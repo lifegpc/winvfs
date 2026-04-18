@@ -54,6 +54,7 @@ private:
     std::string base_path;
     std::string nt_path;
     std::string dos_path;
+    std::string dos_system_path;
     std::string guid_path;
     std::list<Xp3Archive*> archives;
     std::unordered_map<std::string, std::pair<FileEntry, Xp3Archive*>, CaseInsensitiveHash, CaseInsensitiveEqual> files;

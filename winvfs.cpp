@@ -154,11 +154,28 @@ typedef struct _FILE_FS_VOLUME_INFORMATION {
     BOOLEAN       SupportsObjects;
     WCHAR         VolumeLabel[1];
 } FILE_FS_VOLUME_INFORMATION, *PFILE_FS_VOLUME_INFORMATION;
+typedef struct _FILE_FS_DEVICE_INFORMATION {
+    DEVICE_TYPE DeviceType;
+    ULONG       Characteristics;
+} FILE_FS_DEVICE_INFORMATION, *PFILE_FS_DEVICE_INFORMATION;
 static decltype(&NtQueryObject) Real_NtQueryObject = nullptr;
 #define ObjectNameInformation 1
 typedef struct _OBJECT_NAME_INFORMATION {
     UNICODE_STRING Name;
 } OBJECT_NAME_INFORMATION, *POBJECT_NAME_INFORMATION;
+typedef NTSTATUS(NTAPI* NtQueryAttributesFile_t)(
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    OUT PFILE_BASIC_INFORMATION FileInformation
+);
+static NtQueryAttributesFile_t Real_NtQueryAttributesFile = nullptr;
+typedef NTSTATUS(NTAPI* NtSetInformationFile_t)(
+    IN HANDLE FileHandle,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    IN PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass
+);
+static NtSetInformationFile_t Real_NtSetInformationFile = nullptr;
 
 __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
     OUT PHANDLE FileHandle,
@@ -226,7 +243,12 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtReadFile(
     auto file = g_vfs.GetFile(FileHandle);
     if (file) {
         g_vfs.Log("NtReadFile: %p, Length: %lu, ByteOffset: %lld\n", FileHandle, Length, ByteOffset ? ByteOffset->QuadPart : -1);
-        auto bytesRead = file->read((uint8_t*)Buffer, Length);
+        size_t bytesRead;
+        if (ByteOffset) {
+            bytesRead = file->read_at((uint8_t*)Buffer, Length, ByteOffset->QuadPart);
+        } else {
+            bytesRead = file->read((uint8_t*)Buffer, Length);
+        }
         g_vfs.Log("Bytes read: %llu\n", bytesRead);
         if (bytesRead == 0) {
             IoStatusBlock->Status = STATUS_SUCCESS;
@@ -346,7 +368,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryInformationFile(
                 IoStatusBlock->Information = sizeof(FILE_POSITION_INFORMATION);
                 return STATUS_SUCCESS;
             } else {
-                return STATUS_SUCCESS;
+                return STATUS_UNSUCCESSFUL;
             }
         } else if (FileInformationClass == FileModeInformation) {
             if (Length < sizeof(FILE_MODE_INFORMATION)) {
@@ -477,6 +499,16 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryVolumeInformationFile(
                 IoStatusBlock->Information = offsetof(FILE_FS_VOLUME_INFORMATION, VolumeLabel) + labelLen;
                 return STATUS_SUCCESS;
             }
+        } else if (FsInformationClass == FileFsDeviceInformation) {
+            if (Length < sizeof(FILE_FS_DEVICE_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_FS_DEVICE_INFORMATION* info = (FILE_FS_DEVICE_INFORMATION*)FsInformation;
+            info->DeviceType = FILE_DEVICE_DISK; // Report as disk device
+            info->Characteristics = 0; // No special characteristics
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_FS_DEVICE_INFORMATION);
+            return STATUS_SUCCESS;
         }
     }
     if (g_vfs.InTrace(FileHandle)) {
@@ -530,6 +562,77 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryObject(
     return Real_NtQueryObject(Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength, ReturnLength);
 }
 
+__kernel_entry NTSTATUS NTAPI Hooked_NtQueryAttributesFile(
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    OUT PFILE_BASIC_INFORMATION FileInformation
+) {
+    if (ObjectAttributes->ObjectName && ObjectAttributes->ObjectName->Buffer) {
+        std::wstring wFilepath(ObjectAttributes->ObjectName->Buffer, ObjectAttributes->ObjectName->Length / sizeof(WCHAR));
+        std::string filepath;
+        if (wchar_util::wstr_to_str(filepath, wFilepath, CP_UTF8)) {
+            if (ObjectAttributes->RootDirectory) {
+                auto hDir = ObjectAttributes->RootDirectory;
+                std::string basePath = getFinalPath(hDir, FILE_NAME_NORMALIZED);
+                filepath = basePath + "\\" + filepath;
+            }
+            g_vfs.Log("NtQueryAttributesFile: %s\n", filepath.c_str());
+            FileEntry entry;
+            Xp3Archive* archive;
+            if (g_vfs.GetEntry(filepath, entry, archive)) {
+                g_vfs.Log("File found in VFS: %s\n", filepath.c_str());
+                // Set creation, access, write, change time to current time for simplicity
+                FILETIME ft;
+                GetSystemTimeAsFileTime(&ft);
+                FileInformation->CreationTime.LowPart = ft.dwLowDateTime;
+                FileInformation->CreationTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastAccessTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastAccessTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastWriteTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastWriteTime.HighPart = ft.dwHighDateTime;
+                FileInformation->ChangeTime.LowPart = ft.dwLowDateTime;
+                FileInformation->ChangeTime.HighPart = ft.dwHighDateTime;
+                FileInformation->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+    return Real_NtQueryAttributesFile(ObjectAttributes, FileInformation);
+}
+
+__kernel_entry NTSTATUS NTAPI Hooked_NtSetInformationFile(
+    IN HANDLE FileHandle,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    IN PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass
+) {
+    FileEntry entry;
+    Xp3Archive* archive;
+    if (g_vfs.GetFileInfo(FileHandle, entry, archive)) {
+        g_vfs.Log("NtSetInformationFile: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        if (FileInformationClass == FilePositionInformation) {
+            if (Length < sizeof(FILE_POSITION_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_POSITION_INFORMATION* info = (FILE_POSITION_INFORMATION*)FileInformation;
+            auto file = g_vfs.GetFile(FileHandle);
+            if (file) {
+                auto result = file->seek(info->CurrentByteOffset.QuadPart, SEEK_SET);
+                if (result) {
+                    IoStatusBlock->Status = STATUS_SUCCESS;
+                    IoStatusBlock->Information = sizeof(FILE_POSITION_INFORMATION);
+                    return STATUS_SUCCESS;
+                } else {
+                    return STATUS_UNSUCCESSFUL;
+                }
+            } else {
+                return STATUS_UNSUCCESSFUL;
+            }
+        }
+    }
+    return Real_NtSetInformationFile(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
+}
+
 VFS::VFS() {
     WCHAR exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
@@ -555,6 +658,8 @@ VFS::VFS() {
     }
     if (!dos_path.empty()) {
         dos_path += "\\";
+        // replace \\?\ with \??\ 
+        dos_system_path = "\\??\\" + dos_path.substr(4);
     }
     if (!guid_path.empty()) {
         guid_path += "\\";
@@ -620,6 +725,14 @@ bool VFS::Init() {
     if (!Real_NtQueryObject) {
         return false;
     }
+    Real_NtQueryAttributesFile = (decltype(Real_NtQueryAttributesFile))GetProcAddress(hModule, "NtQueryAttributesFile");
+    if (!Real_NtQueryAttributesFile) {
+        return false;
+    }
+    Real_NtSetInformationFile = (decltype(Real_NtSetInformationFile))GetProcAddress(hModule, "NtSetInformationFile");
+    if (!Real_NtSetInformationFile) {
+        return false;
+    }
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&Real_NtCreateFile, Hooked_NtCreateFile);
@@ -628,6 +741,8 @@ bool VFS::Init() {
     DetourAttach(&Real_NtQueryInformationFile, Hooked_NtQueryInformationFile);
     DetourAttach(&Real_NtQueryVolumeInformationFile, Hooked_NtQueryVolumeInformationFile);
     DetourAttach(&Real_NtQueryObject, Hooked_NtQueryObject);
+    DetourAttach(&Real_NtQueryAttributesFile, Hooked_NtQueryAttributesFile);
+    DetourAttach(&Real_NtSetInformationFile, Hooked_NtSetInformationFile);
     DetourTransactionCommit();
     inited = true;
     return true;
@@ -637,6 +752,8 @@ bool VFS::GetEntry(std::string& path, FileEntry& entry, Xp3Archive*& archive) {
     std::string rPath;
     if (str_util::str_startswith(path, dos_path)) {
         rPath = path.substr(dos_path.length());
+    } else if (str_util::str_startswith(path, dos_system_path)) {
+        rPath = path.substr(dos_system_path.length());
     } else if (str_util::str_startswith(path, guid_path)) {
         rPath = path.substr(guid_path.length());
     } else if (str_util::str_startswith(path, nt_path)) {
@@ -722,6 +839,8 @@ bool VFS::Uninit() {
     DetourDetach(&Real_NtQueryInformationFile, Hooked_NtQueryInformationFile);
     DetourDetach(&Real_NtQueryVolumeInformationFile, Hooked_NtQueryVolumeInformationFile);
     DetourDetach(&Real_NtQueryObject, Hooked_NtQueryObject);
+    DetourDetach(&Real_NtQueryAttributesFile, Hooked_NtQueryAttributesFile);
+    DetourDetach(&Real_NtSetInformationFile, Hooked_NtSetInformationFile);
     DetourTransactionCommit();
     inited = false;
     return true;
