@@ -176,6 +176,52 @@ typedef NTSTATUS(NTAPI* NtSetInformationFile_t)(
     IN FILE_INFORMATION_CLASS FileInformationClass
 );
 static NtSetInformationFile_t Real_NtSetInformationFile = nullptr;
+static decltype(&NtOpenFile) Real_NtOpenFile = nullptr;
+typedef NTSTATUS(NTAPI* NtCreateSection_t)(
+    OUT PHANDLE SectionHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+    IN PLARGE_INTEGER MaximumSize OPTIONAL,
+    IN ULONG SectionPageProtection,
+    IN ULONG AllocationAttributes,
+    IN HANDLE FileHandle OPTIONAL
+);
+static NtCreateSection_t Real_NtCreateSection = nullptr;
+/**
+ * The SECTION_INHERIT structure specifies how the mapped view of the section is to be shared with child processes.
+ */
+typedef enum _SECTION_INHERIT {
+    ViewShare = 1, // The mapped view of the section will be mapped into any child processes created by the process.
+    ViewUnmap = 2  // The mapped view of the section will not be mapped into any child processes created by the process.
+} SECTION_INHERIT;
+typedef NTSTATUS(NTAPI* NtMapViewOfSection_t)(
+    IN HANDLE SectionHandle,
+    IN HANDLE ProcessHandle,
+    IN OUT PVOID* BaseAddress,
+    IN ULONG_PTR ZeroBits,
+    IN SIZE_T CommitSize,
+    IN OUT PLARGE_INTEGER SectionOffset OPTIONAL,
+    IN OUT PSIZE_T ViewSize,
+    IN SECTION_INHERIT InheritDisposition,
+    IN ULONG AllocationType,
+    IN ULONG Win32Protect
+);
+static NtMapViewOfSection_t Real_NtMapViewOfSection = nullptr;
+typedef NTSTATUS(NTAPI* NtUnmapViewOfSection_t)(
+    IN HANDLE ProcessHandle,
+    IN PVOID BaseAddress
+);
+static NtUnmapViewOfSection_t Real_NtUnmapViewOfSection = nullptr;
+typedef NTSTATUS(NTAPI* NtDuplicateObject_t)(
+    IN HANDLE SourceProcessHandle,
+    IN HANDLE SourceHandle,
+    IN HANDLE TargetProcessHandle OPTIONAL,
+    OUT PHANDLE TargetHandle OPTIONAL,
+    IN ACCESS_MASK DesiredAccess,
+    IN ULONG HandleAttributes,
+    IN ULONG Options
+);
+static NtDuplicateObject_t Real_NtDuplicateObject = nullptr;
 
 __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
     OUT PHANDLE FileHandle,
@@ -218,6 +264,42 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
     return Real_NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
 }
 
+__kernel_entry NTSTATUS NTAPI Hooked_NtOpenFile(
+    OUT PHANDLE FileHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    IN ULONG ShareAccess,
+    IN ULONG OpenOptions
+) {
+    if (ObjectAttributes->ObjectName && ObjectAttributes->ObjectName->Buffer) {
+        std::wstring wFilepath(ObjectAttributes->ObjectName->Buffer, ObjectAttributes->ObjectName->Length / sizeof(WCHAR));
+        std::string filepath;
+        if (wchar_util::wstr_to_str(filepath, wFilepath, CP_UTF8)) {
+            if (ObjectAttributes->RootDirectory) {
+                auto hDir = ObjectAttributes->RootDirectory;
+                std::string basePath = getFinalPath(hDir, FILE_NAME_NORMALIZED);
+                filepath = basePath + "\\" + filepath;
+            }
+            g_vfs.Log("NtOpenFile: %s\n", filepath.c_str());
+            FileEntry entry;
+            Xp3Archive* archive;
+            if (g_vfs.GetEntry(filepath, entry, archive)) {
+                g_vfs.Log("File found in VFS: %s\n", filepath.c_str());
+                auto hFile = g_vfs.OpenFile(entry, archive);
+                if (hFile != INVALID_HANDLE_VALUE) {
+                    *FileHandle = hFile;
+                    IoStatusBlock->Status = FILE_OPENED;
+                    IoStatusBlock->Information = 0;
+                    g_vfs.Log("File opened successfully: %s. %p\n", filepath.c_str(), hFile);
+                    return STATUS_SUCCESS;
+                }
+            }
+        }
+    }
+    return Real_NtOpenFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, ShareAccess, OpenOptions);
+}
+
 __kernel_entry NTSTATUS NTAPI Hooked_NtClose(
     IN HANDLE Handle
 ) {
@@ -225,6 +307,10 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtClose(
         g_vfs.Log("NtClose: %p\n", Handle);
         g_vfs.CloseFile(Handle);
         return STATUS_SUCCESS;
+    }
+    if (g_vfs.IsSectionHandle(Handle)) {
+        g_vfs.Log("NtClose (section handle): %p\n", Handle);
+        g_vfs.RemoveSectionHandle(Handle);
     }
     return Real_NtClose(Handle);
 }
@@ -633,6 +719,114 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtSetInformationFile(
     return Real_NtSetInformationFile(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
 }
 
+__kernel_entry NTSTATUS NTAPI Hooked_NtCreateSection(
+    OUT PHANDLE SectionHandle,
+    IN ACCESS_MASK DesiredAccess,
+    IN POBJECT_ATTRIBUTES ObjectAttributes OPTIONAL,
+    IN PLARGE_INTEGER MaximumSize OPTIONAL,
+    IN ULONG SectionPageProtection,
+    IN ULONG AllocationAttributes,
+    IN HANDLE FileHandle OPTIONAL
+) {
+    if (FileHandle != INVALID_HANDLE_VALUE) {
+        FileEntry entry;
+        Xp3Archive* archive;
+        if (g_vfs.GetFileInfo(FileHandle, entry, archive)) {
+            g_vfs.Log("NtCreateSection: %p\n", FileHandle);
+            if (!(AllocationAttributes & SEC_IMAGE)) {
+                auto file = g_vfs.GetFile(FileHandle);
+                if (!file) {
+                    return STATUS_UNSUCCESSFUL;
+                }
+                // For non-image sections. We don't use temporary files.
+                LARGE_INTEGER sectionSize;
+                if (MaximumSize) {
+                    sectionSize = *MaximumSize;
+                } else {
+                    sectionSize.QuadPart = entry.original_size;
+                }
+                if (sectionSize.QuadPart == 0) {
+                    sectionSize.QuadPart = entry.original_size;
+                }
+                if (sectionSize.QuadPart > entry.original_size) {
+                    sectionSize.QuadPart = entry.original_size;
+                }
+                // Create a section in memory
+                HANDLE hNewSection = NULL;
+                NTSTATUS status = Real_NtCreateSection(&hNewSection, SECTION_ALL_ACCESS, ObjectAttributes, &sectionSize, PAGE_READWRITE, SEC_COMMIT, NULL);
+                if (status != STATUS_SUCCESS) {
+                    g_vfs.Log("Failed to create section: %08X\n", status);
+                    return status;
+                }
+                PVOID pBase = NULL;
+                SIZE_T viewSize = 0;
+                status = Real_NtMapViewOfSection(hNewSection, (HANDLE)-1, &pBase, 0, 0, NULL, &viewSize, ViewShare, 0, PAGE_READWRITE);
+                if (status != STATUS_SUCCESS) {
+                    g_vfs.Log("Failed to map view of section: %08X\n", status);
+                    Real_NtClose(hNewSection);
+                    return status;
+                }
+                // Read file content into the section
+                file->seek(0, SEEK_SET);
+                bool ok = file->readall((uint8_t*)pBase, min(sectionSize.QuadPart, viewSize));
+                if (!ok) {
+                    Real_NtUnmapViewOfSection((HANDLE)-1, pBase);
+                    Real_NtClose(hNewSection);
+                    return STATUS_UNSUCCESSFUL;
+                }
+                g_vfs.Log("File content mapped to section successfully: %p, viewSize: %llu, fileSize: %llu, sectionSize: %llu, MaximumSize: %lld\n", pBase, viewSize, entry.original_size, sectionSize.QuadPart, MaximumSize ? MaximumSize->QuadPart : -1);
+                status = Real_NtUnmapViewOfSection((HANDLE)-1, pBase);
+                if (status != STATUS_SUCCESS) {
+                    g_vfs.Log("Failed to unmap view of section: %08X\n", status);
+                    Real_NtClose(hNewSection);
+                    return status;
+                }
+                HANDLE hUserSection = NULL;
+                HANDLE currentProcess = GetCurrentProcess();
+                status = Real_NtDuplicateObject((HANDLE)-1, hNewSection, currentProcess, &hUserSection, DesiredAccess, 0, DUPLICATE_CLOSE_SOURCE);
+                if (NT_SUCCESS(status)) {
+                    *SectionHandle = hUserSection;
+                } else {
+                    g_vfs.Log("Failed to duplicate section handle: %08X\n", status);
+                    Real_NtClose(hNewSection);
+                }
+                g_vfs.AddSectionHandle(hUserSection, std::pair(entry, archive));
+                return status;
+            }
+        }
+    }
+    return Real_NtCreateSection(SectionHandle, DesiredAccess, ObjectAttributes, MaximumSize, SectionPageProtection, AllocationAttributes, FileHandle);
+}
+
+__kernel_entry NTSTATUS NTAPI Hooked_NtMapViewOfSection(
+    IN HANDLE SectionHandle,
+    IN HANDLE ProcessHandle,
+    IN OUT PVOID* BaseAddress,
+    IN ULONG_PTR ZeroBits,
+    IN SIZE_T CommitSize,
+    IN OUT PLARGE_INTEGER SectionOffset OPTIONAL,
+    IN OUT PSIZE_T ViewSize,
+    IN SECTION_INHERIT InheritDisposition,
+    IN ULONG AllocationType,
+    IN ULONG Win32Protect
+) {
+    if (g_vfs.IsSectionHandle(SectionHandle)) {
+        g_vfs.Log("NtMapViewOfSection: %p\n", SectionHandle);
+        auto result = Real_NtMapViewOfSection(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect);
+        g_vfs.Log("Result: %08X, viewSize: %llu, SectionOffset: %lli\n", result, *ViewSize, SectionOffset ? SectionOffset->QuadPart : -1);
+        if (!result) {
+            FileEntry entry;
+            Xp3Archive* archive;
+            if (g_vfs.GetSectionInfo(SectionHandle, entry, archive)) {
+                *ViewSize = min(*ViewSize, (SIZE_T)(entry.original_size - (SectionOffset ? SectionOffset->QuadPart : 0)));
+                g_vfs.Log("Adjusted view size: %llu\n", *ViewSize);
+            }
+        }
+        return result;
+    }
+    return Real_NtMapViewOfSection(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect);
+}
+
 VFS::VFS() {
     WCHAR exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
@@ -733,6 +927,26 @@ bool VFS::Init() {
     if (!Real_NtSetInformationFile) {
         return false;
     }
+    Real_NtOpenFile = (decltype(Real_NtOpenFile))GetProcAddress(hModule, "NtOpenFile");
+    if (!Real_NtOpenFile) {
+        return false;
+    }
+    Real_NtCreateSection = (decltype(Real_NtCreateSection))GetProcAddress(hModule, "NtCreateSection");
+    if (!Real_NtCreateSection) {
+        return false;
+    }
+    Real_NtMapViewOfSection = (decltype(Real_NtMapViewOfSection))GetProcAddress(hModule, "NtMapViewOfSection");
+    if (!Real_NtMapViewOfSection) {
+        return false;
+    }
+    Real_NtUnmapViewOfSection = (decltype(Real_NtUnmapViewOfSection))GetProcAddress(hModule, "NtUnmapViewOfSection");
+    if (!Real_NtUnmapViewOfSection) {
+        return false;
+    }
+    Real_NtDuplicateObject = (decltype(Real_NtDuplicateObject))GetProcAddress(hModule, "NtDuplicateObject");
+    if (!Real_NtDuplicateObject) {
+        return false;
+    }
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&Real_NtCreateFile, Hooked_NtCreateFile);
@@ -743,6 +957,9 @@ bool VFS::Init() {
     DetourAttach(&Real_NtQueryObject, Hooked_NtQueryObject);
     DetourAttach(&Real_NtQueryAttributesFile, Hooked_NtQueryAttributesFile);
     DetourAttach(&Real_NtSetInformationFile, Hooked_NtSetInformationFile);
+    DetourAttach(&Real_NtOpenFile, Hooked_NtOpenFile);
+    DetourAttach(&Real_NtCreateSection, Hooked_NtCreateSection);
+    DetourAttach(&Real_NtMapViewOfSection, Hooked_NtMapViewOfSection);
     DetourTransactionCommit();
     inited = true;
     return true;
@@ -841,6 +1058,9 @@ bool VFS::Uninit() {
     DetourDetach(&Real_NtQueryObject, Hooked_NtQueryObject);
     DetourDetach(&Real_NtQueryAttributesFile, Hooked_NtQueryAttributesFile);
     DetourDetach(&Real_NtSetInformationFile, Hooked_NtSetInformationFile);
+    DetourDetach(&Real_NtOpenFile, Hooked_NtOpenFile);
+    DetourDetach(&Real_NtCreateSection, Hooked_NtCreateSection);
+    DetourDetach(&Real_NtMapViewOfSection, Hooked_NtMapViewOfSection);
     DetourTransactionCommit();
     inited = false;
     return true;
@@ -856,4 +1076,26 @@ void VFS::AddTrace(HANDLE hFile) {
 
 bool VFS::InTrace(HANDLE hFile) {
     return trace_handles.find(hFile) != trace_handles.end();
+}
+
+void VFS::AddSectionHandle(HANDLE hSection, std::pair<FileEntry, Xp3Archive*> fileInfo) {
+    section_handles[hSection] = fileInfo;
+}
+
+bool VFS::IsSectionHandle(HANDLE hSection) {
+    return section_handles.find(hSection) != section_handles.end();
+}
+
+void VFS::RemoveSectionHandle(HANDLE hSection) {
+    section_handles.erase(hSection);
+}
+
+bool VFS::GetSectionInfo(HANDLE hSection, FileEntry& entry, Xp3Archive*& archive) {
+    auto it = section_handles.find(hSection);
+    if (it != section_handles.end()) {
+        entry = it->second.first;
+        archive = it->second.second;
+        return true;
+    }
+    return false;
 }

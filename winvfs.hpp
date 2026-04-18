@@ -49,6 +49,10 @@ public:
     std::string GetNtPath(std::string& path);
     void AddTrace(HANDLE hFile);
     bool InTrace(HANDLE hFile);
+    void AddSectionHandle(HANDLE hSection, std::pair<FileEntry, Xp3Archive*> fileInfo);
+    bool GetSectionInfo(HANDLE hSection, FileEntry& entry, Xp3Archive*& archive);
+    bool IsSectionHandle(HANDLE hSection);
+    void RemoveSectionHandle(HANDLE hSection);
 private:
     bool inited = false;
     std::string base_path;
@@ -60,6 +64,7 @@ private:
     std::unordered_map<std::string, std::pair<FileEntry, Xp3Archive*>, CaseInsensitiveHash, CaseInsensitiveEqual> files;
     std::unordered_map<HANDLE, std::pair<FileEntry, Xp3Archive*>> handle_map;
     std::unordered_set<HANDLE> trace_handles;
+    std::unordered_map<HANDLE, std::pair<FileEntry, Xp3Archive*>> section_handles;
 };
 
 VFS& GetGlobalVFS();

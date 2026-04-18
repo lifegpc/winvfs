@@ -63,6 +63,36 @@ int main() {
             wchar_util::wstr_to_str(strFullPath, wFullPath, CP_UTF8);
             printf("Final path (GUID): %s\n", strFullPath.c_str());
         }
+        auto fileType = GetFileType(file);
+        printf("File type: %d\n", fileType);
+        LARGE_INTEGER fileSize;
+        if (GetFileSizeEx(file, &fileSize)) {
+            printf("File size: %lld bytes\n", fileSize.QuadPart);
+        } else {
+            std::string errMsg;
+            err::get_winerror(errMsg, GetLastError());
+            printf("Failed to get file size: %s\n", errMsg.c_str());
+        }
+        auto mapping = CreateFileMappingW(file, NULL, PAGE_READONLY, 0, 0, NULL);
+        if (mapping == NULL) {
+            std::string errMsg;
+            err::get_winerror(errMsg, GetLastError());
+            printf("Failed to create file mapping: %s\n", errMsg.c_str());
+        } else {
+            printf("File mapping created successfully: %p\n", mapping);
+            auto view = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+            if (view == NULL) {
+                std::string errMsg;
+                err::get_winerror(errMsg, GetLastError());
+                printf("Failed to map view of file: %s\n", errMsg.c_str());
+            } else {
+                printf("File mapped successfully: %p\n", view);
+                printf("Mapped content:\n");
+                printf("%.*s\n", (int)fileSize.QuadPart, (char*)view);
+                UnmapViewOfFile(view);
+            }
+            CloseHandle(mapping);
+        }
         auto cls = CloseHandle(file);
         if (!cls) {
             printf("Failed to close file handle\n");
