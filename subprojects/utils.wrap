@@ -1,0 +1,8 @@
+[wrap-git]
+directory = utils
+url = https://github.com/lifegpc/c-utils.git
+revision = HEAD
+depth = 1
+
+[provide]
+utils = utils_dep
