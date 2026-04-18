@@ -222,6 +222,20 @@ typedef NTSTATUS(NTAPI* NtDuplicateObject_t)(
     IN ULONG Options
 );
 static NtDuplicateObject_t Real_NtDuplicateObject = nullptr;
+typedef struct _FILE_NETWORK_OPEN_INFORMATION {
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER AllocationSize;
+    LARGE_INTEGER EndOfFile;
+    ULONG         FileAttributes;
+} FILE_NETWORK_OPEN_INFORMATION, *PFILE_NETWORK_OPEN_INFORMATION;
+typedef NTSTATUS(NTAPI* NtQueryFullAttributesFile_t)(
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    OUT PFILE_NETWORK_OPEN_INFORMATION FileInformation
+);
+static NtQueryFullAttributesFile_t Real_NtQueryFullAttributesFile = nullptr;
 
 __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
     OUT PHANDLE FileHandle,
@@ -827,6 +841,45 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtMapViewOfSection(
     return Real_NtMapViewOfSection(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect);
 }
 
+__kernel_entry NTSTATUS NTAPI Hooked_NtQueryFullAttributesFile(
+    IN POBJECT_ATTRIBUTES ObjectAttributes,
+    OUT PFILE_NETWORK_OPEN_INFORMATION FileInformation
+) {
+    if (ObjectAttributes->ObjectName && ObjectAttributes->ObjectName->Buffer) {
+        std::wstring wFilepath(ObjectAttributes->ObjectName->Buffer, ObjectAttributes->ObjectName->Length / sizeof(WCHAR));
+        std::string filepath;
+        if (wchar_util::wstr_to_str(filepath, wFilepath, CP_UTF8)) {
+            if (ObjectAttributes->RootDirectory) {
+                auto hDir = ObjectAttributes->RootDirectory;
+                std::string basePath = getFinalPath(hDir, FILE_NAME_NORMALIZED);
+                filepath = basePath + "\\" + filepath;
+            }
+            g_vfs.Log("NtQueryFullAttributesFile: %s\n", filepath.c_str());
+            FileEntry entry;
+            Xp3Archive* archive;
+            if (g_vfs.GetEntry(filepath, entry, archive)) {
+                g_vfs.Log("File found in VFS: %s\n", filepath.c_str());
+                // Set creation, access, write, change time to current time for simplicity
+                FILETIME ft;
+                GetSystemTimeAsFileTime(&ft);
+                FileInformation->CreationTime.LowPart = ft.dwLowDateTime;
+                FileInformation->CreationTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastAccessTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastAccessTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastWriteTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastWriteTime.HighPart = ft.dwHighDateTime;
+                FileInformation->ChangeTime.LowPart = ft.dwLowDateTime;
+                FileInformation->ChangeTime.HighPart = ft.dwHighDateTime;
+                FileInformation->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
+                FileInformation->AllocationSize.QuadPart = entry.original_size;
+                FileInformation->EndOfFile.QuadPart = entry.original_size;
+                return STATUS_SUCCESS;
+            }
+        }
+    }
+    return Real_NtQueryFullAttributesFile(ObjectAttributes, FileInformation);
+}
+
 VFS::VFS() {
     WCHAR exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
@@ -947,6 +1000,10 @@ bool VFS::Init() {
     if (!Real_NtDuplicateObject) {
         return false;
     }
+    Real_NtQueryFullAttributesFile = (decltype(Real_NtQueryFullAttributesFile))GetProcAddress(hModule, "NtQueryFullAttributesFile");
+    if (!Real_NtQueryFullAttributesFile) {
+        return false;
+    }
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&Real_NtCreateFile, Hooked_NtCreateFile);
@@ -960,6 +1017,7 @@ bool VFS::Init() {
     DetourAttach(&Real_NtOpenFile, Hooked_NtOpenFile);
     DetourAttach(&Real_NtCreateSection, Hooked_NtCreateSection);
     DetourAttach(&Real_NtMapViewOfSection, Hooked_NtMapViewOfSection);
+    DetourAttach(&Real_NtQueryFullAttributesFile, Hooked_NtQueryFullAttributesFile);
     DetourTransactionCommit();
     inited = true;
     return true;
@@ -1061,6 +1119,7 @@ bool VFS::Uninit() {
     DetourDetach(&Real_NtOpenFile, Hooked_NtOpenFile);
     DetourDetach(&Real_NtCreateSection, Hooked_NtCreateSection);
     DetourDetach(&Real_NtMapViewOfSection, Hooked_NtMapViewOfSection);
+    DetourDetach(&Real_NtQueryFullAttributesFile, Hooked_NtQueryFullAttributesFile);
     DetourTransactionCommit();
     inited = false;
     return true;

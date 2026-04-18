@@ -147,5 +147,16 @@ int main() {
     } else {
         printf("File attributes: 0x%08X\n", attributes);
     }
+    if (fileop::exists("hello.txt")) {
+        printf("fileop::exists: hello.txt File exists\n");
+    }
+    struct __stat64 fileStat;
+    if (_wstat64(L"hello.txt", &fileStat) == 0) {
+        printf("File size from _wstat64: %lld bytes\n", fileStat.st_size);
+    } else {
+        std::string errMsg;
+        err::get_errno_message(errMsg, errno);
+        printf("Failed to get file status with _wstat64: %s\n", errMsg.c_str());
+    }
     return 0;
 }
