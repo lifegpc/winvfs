@@ -3,7 +3,7 @@
 #include "wchar_util.h"
 #include "fileop.h"
 #include "detours.h"
-#include <winternl.h>
+#include <functional>
 // #include <ntstatus.h>
 
 static VFS g_vfs;
@@ -14,9 +14,11 @@ VFS& GetGlobalVFS() {
 
 #define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
 #define STATUS_BUFFER_OVERFLOW ((NTSTATUS)0x80000005L)
+#define STATUS_NO_MORE_FILES ((NTSTATUS)0x80000006L)
 #define STATUS_UNSUCCESSFUL ((NTSTATUS)0xC0000001L)
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
 #define STATUS_BUFFER_TOO_SMALL ((NTSTATUS)0xC0000023L)
+#define STATUS_INSUFFICIENT_RESOURCES ((NTSTATUS)0xC000009AL)
 
 std::string getFinalPath(HANDLE hDir, DWORD flags) {
     wchar_t buf[MAX_PATH];
@@ -236,6 +238,52 @@ typedef NTSTATUS(NTAPI* NtQueryFullAttributesFile_t)(
     OUT PFILE_NETWORK_OPEN_INFORMATION FileInformation
 );
 static NtQueryFullAttributesFile_t Real_NtQueryFullAttributesFile = nullptr;
+typedef NTSTATUS(NTAPI* NtQueryDirectoryFile_t)(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    OUT PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass,
+    IN BOOLEAN ReturnSingleEntry,
+    IN PUNICODE_STRING FileName OPTIONAL,
+    IN BOOLEAN RestartScan
+);
+static NtQueryDirectoryFile_t Real_NtQueryDirectoryFile = nullptr;
+typedef NTSTATUS(NTAPI* NtQueryDirectoryFileEx_t)(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    OUT PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass,
+    IN ULONG QueryFlags,
+    IN PUNICODE_STRING FileName OPTIONAL
+);
+static NtQueryDirectoryFileEx_t Real_NtQueryDirectoryFileEx = nullptr;
+#define SL_RESTART_SCAN 0x00000001
+#define SL_RETURN_SINGLE_ENTRY 0x00000002
+#define FileBothDirectoryInformation 3
+typedef struct _FILE_BOTH_DIR_INFORMATION {
+    ULONG         NextEntryOffset;
+    ULONG         FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         FileNameLength;
+    ULONG         EaSize;
+    CCHAR         ShortNameLength;
+    WCHAR         ShortName[12];
+    WCHAR         FileName[1];
+} FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
 
 __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
     OUT PHANDLE FileHandle,
@@ -272,6 +320,12 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
                     g_vfs.Log("File opened successfully: %s. %p\n", filepath.c_str(), hFile);
                     return STATUS_SUCCESS;
                 }
+            } else if (g_vfs.IsRootDirectory(filepath)) {
+                auto status = Real_NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
+                if (status == STATUS_SUCCESS) {
+                    g_vfs.AddExistedDirHandle(*FileHandle, "/");
+                }
+                return status;
             }
         }
     }
@@ -308,6 +362,12 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtOpenFile(
                     g_vfs.Log("File opened successfully: %s. %p\n", filepath.c_str(), hFile);
                     return STATUS_SUCCESS;
                 }
+            } else if (g_vfs.IsRootDirectory(filepath)) {
+                auto status = Real_NtOpenFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, ShareAccess, OpenOptions);
+                if (status == STATUS_SUCCESS) {
+                    g_vfs.AddExistedDirHandle(*FileHandle, "/");
+                }
+                return status;
             }
         }
     }
@@ -325,6 +385,10 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtClose(
     if (g_vfs.IsSectionHandle(Handle)) {
         g_vfs.Log("NtClose (section handle): %p\n", Handle);
         g_vfs.RemoveSectionHandle(Handle);
+    }
+    if (g_vfs.IsExistedDirHandle(Handle)) {
+        g_vfs.Log("NtClose (existed dir handle): %p\n", Handle);
+        g_vfs.RemoveExistedDirHandle(Handle);
     }
     return Real_NtClose(Handle);
 }
@@ -880,6 +944,281 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryFullAttributesFile(
     return Real_NtQueryFullAttributesFile(ObjectAttributes, FileInformation);
 }
 
+#define ENTRY_BLOCK_SIZE 64
+
+template <typename T>
+NTSTATUS CollectEntries(
+    IN HANDLE FileHandle,
+    IN FILE_INFORMATION_CLASS InformationClass,
+    IN PUNICODE_STRING FilePath,
+    DirEntriesCache<T>& entries
+) {
+    BOOLEAN RestartScan = TRUE;
+    IO_STATUS_BLOCK IoStatusBlock;
+    ZeroMemory(&IoStatusBlock, sizeof(IoStatusBlock));
+    size_t BufferSize = sizeof(T) * ENTRY_BLOCK_SIZE;
+    PVOID Buffer = malloc(BufferSize);
+    if (!Buffer) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    NTSTATUS status;
+    do {
+        status = Real_NtQueryDirectoryFile(FileHandle, NULL, NULL, NULL, &IoStatusBlock, Buffer, (ULONG)BufferSize, InformationClass, FALSE, FilePath, RestartScan);
+        if (status == STATUS_SUCCESS) {
+            size_t offset = 0;
+            while (offset < IoStatusBlock.Information) {
+                T* entry = (T*)((BYTE*)Buffer + offset);
+                ULONG nextOffset = entry->NextEntryOffset;
+                size_t length = nextOffset == 0 ? (IoStatusBlock.Information - offset) : nextOffset;
+                T* entryCopy = (T*)malloc(length);
+                if (!entryCopy) {
+                    free(Buffer);
+                    return STATUS_INSUFFICIENT_RESOURCES;
+                }
+                memcpy(entryCopy, entry, length);
+                entryCopy->NextEntryOffset = (ULONG)length; // Set NextEntryOffset to the actual size of this entry block
+                entries.push_back(entryCopy);
+                if (nextOffset == 0) {
+                    break;
+                }
+                offset += nextOffset;
+            }
+            RestartScan = FALSE;
+        } else if (status != STATUS_NO_MORE_FILES) {
+            free(Buffer);
+            return status;
+        }
+    } while (status == STATUS_SUCCESS);
+    free(Buffer);
+    return STATUS_SUCCESS;
+}
+
+template <typename T>
+NTSTATUS CollectEntriesEx(
+    IN HANDLE FileHandle,
+    IN FILE_INFORMATION_CLASS InformationClass,
+    IN PUNICODE_STRING FilePath,
+    IN ULONG QueryFlags,
+    DirEntriesCache<T>& entries
+) {
+    ULONG Flags = QueryFlags;
+    // Remove SL_RESTART_SCAN flag and SL_RETURN_SINGLE_ENTRY flag for internal use, we will handle them ourselves
+    if (Flags & SL_RESTART_SCAN) {
+        Flags &= ~SL_RESTART_SCAN;
+    }
+    if (Flags & SL_RETURN_SINGLE_ENTRY) {
+        Flags &= ~SL_RETURN_SINGLE_ENTRY;
+    }
+    ULONG RestartScan = SL_RESTART_SCAN;
+    IO_STATUS_BLOCK IoStatusBlock;
+    ZeroMemory(&IoStatusBlock, sizeof(IoStatusBlock));
+    size_t BufferSize = sizeof(T) * ENTRY_BLOCK_SIZE;
+    PVOID Buffer = malloc(BufferSize);
+    if (!Buffer) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    NTSTATUS status;
+    do {
+        status = Real_NtQueryDirectoryFileEx(FileHandle, NULL, NULL, NULL, &IoStatusBlock, Buffer, (ULONG)BufferSize, InformationClass, Flags | RestartScan, FilePath);
+        if (status == STATUS_SUCCESS) {
+            size_t offset = 0;
+            while (offset < IoStatusBlock.Information) {
+                T* entry = (T*)((BYTE*)Buffer + offset);
+                ULONG nextOffset = entry->NextEntryOffset;
+                size_t length = nextOffset == 0 ? (IoStatusBlock.Information - offset) : nextOffset;
+                T* entryCopy = (T*)malloc(length);
+                if (!entryCopy) {
+                    free(Buffer);
+                    return STATUS_INSUFFICIENT_RESOURCES;
+                }
+                memcpy(entryCopy, entry, length);
+                entryCopy->NextEntryOffset = (ULONG)length; // Set NextEntryOffset to the actual size of this entry block
+                entries.push_back(entryCopy);
+                if (nextOffset == 0) {
+                    break;
+                }
+                offset += nextOffset;
+            }
+            RestartScan = 0;
+        } else if (status != STATUS_NO_MORE_FILES) {
+            free(Buffer);
+            return status;
+        }
+    } while (status == STATUS_SUCCESS);
+    free(Buffer);
+    return STATUS_SUCCESS;
+}
+
+FILE_BOTH_DIR_INFORMATION* GenFileBothDirInformation(std::string& path, std::string entry) {
+    std::wstring wEntry;
+    if (!wchar_util::str_to_wstr(wEntry, entry, CP_UTF8)) {
+        return nullptr;
+    }
+    std::string fullPath = path + entry;
+    fullPath = fullPath.substr(1);
+    FileEntry fileEntry;
+    bool isDir = false;
+    bool found = g_vfs.GetFileEntry(fullPath, fileEntry);
+    if (wEntry.back() == '/') {
+        wEntry.pop_back();
+        isDir = true;
+    }
+    ULONG fileNameLength = (ULONG)(wEntry.length() * sizeof(WCHAR));
+    size_t entrySize = sizeof(FILE_BOTH_DIR_INFORMATION) + fileNameLength;
+    FILE_BOTH_DIR_INFORMATION* info = (FILE_BOTH_DIR_INFORMATION*)malloc(entrySize);
+    if (!info) {
+        return nullptr;
+    }
+    ZeroMemory(info, entrySize);
+    info->NextEntryOffset = entrySize;
+    info->FileIndex = 0;
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    info->CreationTime.LowPart = ft.dwLowDateTime;
+    info->CreationTime.HighPart = ft.dwHighDateTime;
+    info->LastAccessTime.LowPart = ft.dwLowDateTime;
+    info->LastAccessTime.HighPart = ft.dwHighDateTime;
+    info->LastWriteTime.LowPart = ft.dwLowDateTime;
+    info->LastWriteTime.HighPart = ft.dwHighDateTime;
+    info->ChangeTime.LowPart = ft.dwLowDateTime;
+    info->ChangeTime.HighPart = ft.dwHighDateTime;
+    if (found) {
+        info->EndOfFile.QuadPart = fileEntry.original_size;
+        info->AllocationSize.QuadPart = fileEntry.original_size;
+    }
+    info->FileNameLength = fileNameLength;
+    info->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
+    if (isDir) {
+        info->FileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
+    }
+    info->EaSize = 0;
+    info->ShortNameLength = 0;
+    memcpy(info->FileName, wEntry.c_str(), fileNameLength);
+    info->FileName[info->FileNameLength / sizeof(WCHAR)] = L'\0';
+    return info;
+}
+
+// TODO: Filter entries based on FileName
+template <typename T>
+NTSTATUS GenerateEntries(
+    DirEntriesCache<T>& entries,
+    std::string path,
+    std::function<T*(std::string&,std::string)>&& callback,
+    bool replace = false
+) {
+    auto flist = g_vfs.GetDirectoryEntries(path);
+    for (auto& entry : flist) {
+        T* info = callback(path, entry);
+        if (!info) {
+            return STATUS_UNSUCCESSFUL;
+        }
+        entries.push_back(info, replace);
+    }
+    return STATUS_SUCCESS;
+}
+
+__kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFile(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    OUT PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass,
+    IN BOOLEAN ReturnSingleEntry,
+    IN PUNICODE_STRING FileName OPTIONAL,
+    IN BOOLEAN RestartScan
+) {
+    if (g_vfs.IsExistedDirHandle(FileHandle)) {
+        g_vfs.Log("NtQueryDirectoryFile: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+    }
+    return Real_NtQueryDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length, FileInformationClass, ReturnSingleEntry, FileName, RestartScan);
+}
+
+__kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFileEx(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    OUT PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass,
+    IN ULONG QueryFlags,
+    IN PUNICODE_STRING FileName OPTIONAL
+) {
+    if (g_vfs.IsExistedDirHandle(FileHandle)) {
+        g_vfs.Log("NtQueryDirectoryFileEx: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        if (FileInformationClass == FileBothDirectoryInformation) {
+            if (Length < sizeof(FILE_BOTH_DIR_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            auto cache = g_vfs.GetDirEntriesCache<FILE_BOTH_DIR_INFORMATION>(FileHandle, FileInformationClass);
+            if (cache && (QueryFlags & SL_RESTART_SCAN)) {
+                g_vfs.RemoveDirEntriesCache<FILE_BOTH_DIR_INFORMATION>(FileHandle, FileInformationClass);
+                cache = nullptr;
+            }
+            if (!cache) {
+                cache = new DirEntriesCache<FILE_BOTH_DIR_INFORMATION>();
+                NTSTATUS status = CollectEntriesEx(FileHandle, FileInformationClass, FileName, QueryFlags, *cache);
+                if (status != STATUS_SUCCESS) {
+                    delete cache;
+                    return status;
+                }
+                auto path = g_vfs.GetExistedDirHandlePath(FileHandle);
+                status = GenerateEntries(*cache, path, std::function(GenFileBothDirInformation), true);
+                if (status != STATUS_SUCCESS) {
+                    delete cache;
+                    return status;
+                }
+                g_vfs.AddDirEntriesCache(FileHandle, FileInformationClass, cache);
+            }
+            bool SingleEntry = (QueryFlags & SL_RETURN_SINGLE_ENTRY) != 0;
+            auto entry = cache->peek_one();
+            if (!entry) {
+                g_vfs.RemoveDirEntriesCache<FILE_BOTH_DIR_INFORMATION>(FileHandle, FileInformationClass);
+                IoStatusBlock->Status = STATUS_NO_MORE_FILES;
+                IoStatusBlock->Information = 0;
+                return STATUS_NO_MORE_FILES;
+            }
+            ULONG offset = 0;
+            ULONG preOffset = 0;
+            do {
+                ULONG entrySize = entry->NextEntryOffset;
+                if (offset + entrySize > Length) {
+                    if (offset == 0) {
+                        // The buffer is too small to hold even a single entry
+                        IoStatusBlock->Status = STATUS_BUFFER_OVERFLOW;
+                        IoStatusBlock->Information = entrySize;
+                        return STATUS_BUFFER_OVERFLOW;
+                    } else {
+                        // Return the entries that can fit in the buffer
+                        break;
+                    }
+                }
+                preOffset = offset;
+                offset += entrySize;
+                memcpy((BYTE*)FileInformation + preOffset, entry, entrySize);
+                cache->inc_one();
+                if (SingleEntry) {
+                    break;
+                }
+                entry = cache->peek_one();
+            } while (entry);
+            auto status = STATUS_SUCCESS;
+            if (offset > 0) {
+                ULONG* dest = (ULONG*)((BYTE*)FileInformation + preOffset);
+                *dest = 0;
+            }
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = offset;
+            return STATUS_SUCCESS;
+        }
+    }
+    return Real_NtQueryDirectoryFileEx(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName);
+}
+
 VFS::VFS() {
     WCHAR exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
@@ -936,6 +1275,7 @@ bool VFS::AddArchive(const char* path) {
     for (auto entry: archive->files) {
         auto name = str_util::str_replace(entry.filename, "/", "\\");
         files[name] = std::pair(entry, archive);
+        AddEntry(str_util::str_replace(entry.filename, "\\", "/"));
     }
     return true;
 }
@@ -1004,6 +1344,11 @@ bool VFS::Init() {
     if (!Real_NtQueryFullAttributesFile) {
         return false;
     }
+    Real_NtQueryDirectoryFile = (decltype(Real_NtQueryDirectoryFile))GetProcAddress(hModule, "NtQueryDirectoryFile");
+    if (!Real_NtQueryDirectoryFile) {
+        return false;
+    }
+    Real_NtQueryDirectoryFileEx = (decltype(Real_NtQueryDirectoryFileEx))GetProcAddress(hModule, "NtQueryDirectoryFileEx");
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&Real_NtCreateFile, Hooked_NtCreateFile);
@@ -1018,6 +1363,10 @@ bool VFS::Init() {
     DetourAttach(&Real_NtCreateSection, Hooked_NtCreateSection);
     DetourAttach(&Real_NtMapViewOfSection, Hooked_NtMapViewOfSection);
     DetourAttach(&Real_NtQueryFullAttributesFile, Hooked_NtQueryFullAttributesFile);
+    DetourAttach(&Real_NtQueryDirectoryFile, Hooked_NtQueryDirectoryFile);
+    if (Real_NtQueryDirectoryFileEx) {
+        DetourAttach(&Real_NtQueryDirectoryFileEx, Hooked_NtQueryDirectoryFileEx);
+    }
     DetourTransactionCommit();
     inited = true;
     return true;
@@ -1120,6 +1469,10 @@ bool VFS::Uninit() {
     DetourDetach(&Real_NtCreateSection, Hooked_NtCreateSection);
     DetourDetach(&Real_NtMapViewOfSection, Hooked_NtMapViewOfSection);
     DetourDetach(&Real_NtQueryFullAttributesFile, Hooked_NtQueryFullAttributesFile);
+    DetourDetach(&Real_NtQueryDirectoryFile, Hooked_NtQueryDirectoryFile);
+    if (Real_NtQueryDirectoryFileEx) {
+        DetourDetach(&Real_NtQueryDirectoryFileEx, Hooked_NtQueryDirectoryFileEx);
+    }
     DetourTransactionCommit();
     inited = false;
     return true;
@@ -1154,6 +1507,83 @@ bool VFS::GetSectionInfo(HANDLE hSection, FileEntry& entry, Xp3Archive*& archive
     if (it != section_handles.end()) {
         entry = it->second.first;
         archive = it->second.second;
+        return true;
+    }
+    return false;
+}
+
+bool VFS::IsRootDirectory(std::string& path) {
+    if (path == dos_path || path == dos_system_path || path == guid_path || path == nt_path || path == base_path) {
+        return true;
+    }
+    std::string bPath = path + "\\";
+    return bPath == dos_path || bPath == dos_system_path || bPath == guid_path || bPath == nt_path || bPath == base_path;
+}
+
+void VFS::AddExistedDirHandle(HANDLE hDir, std::string path) {
+    existed_dir_handles[hDir] = path;
+}
+
+std::string VFS::GetExistedDirHandlePath(HANDLE hDir) {
+    auto it = existed_dir_handles.find(hDir);
+    if (it != existed_dir_handles.end()) {
+        return it->second;
+    }
+    return "";
+}
+
+bool VFS::IsExistedDirHandle(HANDLE hDir) {
+    return existed_dir_handles.find(hDir) != existed_dir_handles.end();
+}
+
+void VFS::RemoveExistedDirHandle(HANDLE hDir) {
+    existed_dir_handles.erase(hDir);
+}
+
+void VFS::AddEntry(std::string path) {
+    size_t start = 0;
+    auto ind = path.find_first_of('/');
+    if (ind == std::string::npos) {
+        if (directoryEntries.find("/") == directoryEntries.end()) {
+            directoryEntries["/"] = std::vector<std::string>();
+        }
+        directoryEntries["/"].push_back(path);
+        return;
+    }
+    std::string fDir = "/";
+    while (ind != std::string::npos) {
+        std::string dir = path.substr(start, ind - start + 1); // Include the '/' in the directory name
+        start = ind + 1;
+        std::string nDir = fDir + dir;
+        if (directoryEntries.find(nDir) == directoryEntries.end()) {
+            directoryEntries[nDir] = std::vector<std::string>();
+            directoryEntries[fDir].push_back(dir);
+        }
+        fDir = nDir;
+        ind = path.find_first_of('/', start);
+    }
+    std::string filename = path.substr(start);
+    if (directoryEntries.find(fDir) == directoryEntries.end()) {
+        directoryEntries[fDir] = std::vector<std::string>();
+    }
+    directoryEntries[fDir].push_back(filename);
+}
+
+static std::vector<std::string> emptyVector;
+
+std::vector<std::string>& VFS::GetDirectoryEntries(std::string path) {
+    auto it = directoryEntries.find(path);
+    if (it != directoryEntries.end()) {
+        return it->second;
+    }
+    return emptyVector;
+}
+
+bool VFS::GetFileEntry(std::string path, FileEntry& entry) {
+    path = str_util::str_replace(path, "/", "\\");
+    auto it = files.find(path);
+    if (it != files.end()) {
+        entry = it->second.first;
         return true;
     }
     return false;

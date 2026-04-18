@@ -3,10 +3,12 @@
 #include <list>
 #include <unordered_map>
 #include <unordered_set>
+#include <vector>
 #include "xp3.h"
 #include "str_util.h"
 #include <Windows.h>
 #include <stdio.h>
+#include <winternl.h>
 
 struct CaseInsensitiveHash {
     size_t operator()(const std::string& str) const {
@@ -27,6 +29,69 @@ struct CaseInsensitiveEqual {
                               return std::tolower(a) == std::tolower(b);
                           });
     }
+};
+
+struct PairHasher {
+    template <class T1, class T2>
+    std::size_t operator()(const std::pair<T1, T2>& p) const {
+        auto h1 = std::hash<T1>{}(p.first);
+        auto h2 = std::hash<T2>{}(p.second);
+        return h1 ^ (h2 + 0x9e3779b9 + (h1 << 6) + (h1 >> 2));
+    }
+};
+
+template<typename T>
+class DirEntriesCache {
+public:
+    ~DirEntriesCache() {
+        for (auto entry : entries) {
+            if (entry) delete entry;
+        }
+    }
+    void push_back(T* entry, bool replace = false) {
+        if (replace) {
+            std::wstring filename(entry->FileName, entry->FileNameLength / sizeof(WCHAR));
+            for (size_t i = pos; i < entries.size(); i++) {
+                if (!entries[i]) continue;
+                std::wstring existingFilename(entries[i]->FileName, entries[i]->FileNameLength / sizeof(WCHAR));
+                if (existingFilename == filename) {
+                    delete entries[i];
+                    entries[i] = entry;
+                    return;
+                }
+            }
+        }
+        entries.push_back(entry);
+    }
+    T* peek_one() {
+        if (pos < entries.size()) {
+            return entries[pos];
+        }
+        return nullptr;
+    }
+    void inc_one() {
+        if (pos < entries.size()) {
+            delete entries[pos];
+            entries[pos] = nullptr;
+            pos++;
+        }
+    }
+    using size_type = typename std::vector<T*>::size_type;
+    inline size_type size() const {
+        return entries.size();
+    }
+    using iterator = typename std::vector<T*>::iterator;
+    inline iterator begin() { return entries.begin(); }
+    inline iterator end() { return entries.end(); }
+    using const_iterator = typename std::vector<T*>::const_iterator;
+    inline const_iterator begin() const { return entries.begin(); }
+    inline const_iterator end() const { return entries.end(); }
+    inline bool isEnd() const {
+        return pos >= entries.size();
+    }
+private:
+    std::vector<T*> entries;
+    size_t pos = 0;
 };
 
 class VFS {
@@ -53,7 +118,35 @@ public:
     bool GetSectionInfo(HANDLE hSection, FileEntry& entry, Xp3Archive*& archive);
     bool IsSectionHandle(HANDLE hSection);
     void RemoveSectionHandle(HANDLE hSection);
+    bool IsRootDirectory(std::string& path);
+    void AddExistedDirHandle(HANDLE hDir, std::string path);
+    std::string GetExistedDirHandlePath(HANDLE hDir);
+    bool IsExistedDirHandle(HANDLE hDir);
+    void RemoveExistedDirHandle(HANDLE hDir);
+    template <typename T>
+    void AddDirEntriesCache(HANDLE hDir, FILE_INFORMATION_CLASS infoClass, DirEntriesCache<T>* cache) {
+        dir_entries_cache[std::make_pair(hDir, infoClass)] = cache;
+    }
+    template <typename T>
+    DirEntriesCache<T>* GetDirEntriesCache(HANDLE hDir, FILE_INFORMATION_CLASS infoClass) {
+        auto it = dir_entries_cache.find(std::make_pair(hDir, infoClass));
+        if (it != dir_entries_cache.end()) {
+            return (DirEntriesCache<T>*)it->second;
+        }
+        return nullptr;
+    }
+    template <typename T>
+    void RemoveDirEntriesCache(HANDLE hDir, FILE_INFORMATION_CLASS infoClass) {
+        auto it = dir_entries_cache.find(std::make_pair(hDir, infoClass));
+        if (it != dir_entries_cache.end()) {
+            delete (DirEntriesCache<T>*)it->second;
+            dir_entries_cache.erase(it);
+        }
+    }
+    std::vector<std::string>& GetDirectoryEntries(std::string path);
+    bool GetFileEntry(std::string path, FileEntry& entry);
 private:
+    void AddEntry(std::string path);
     bool inited = false;
     std::string base_path;
     std::string nt_path;
@@ -65,6 +158,10 @@ private:
     std::unordered_map<HANDLE, std::pair<FileEntry, Xp3Archive*>> handle_map;
     std::unordered_set<HANDLE> trace_handles;
     std::unordered_map<HANDLE, std::pair<FileEntry, Xp3Archive*>> section_handles;
+    std::unordered_map<HANDLE, std::string> existed_dir_handles;
+    // second is DirEntriesCache<T>* , T is based on FILE_INFORMATION_CLASS
+    std::unordered_map<std::pair<HANDLE, FILE_INFORMATION_CLASS>, void*, PairHasher> dir_entries_cache;
+    std::unordered_map<std::string, std::vector<std::string>> directoryEntries;
 };
 
 VFS& GetGlobalVFS();

@@ -158,5 +158,28 @@ int main() {
         err::get_errno_message(errMsg, errno);
         printf("Failed to get file status with _wstat64: %s\n", errMsg.c_str());
     }
+    auto hCurrentDir = CreateFileW(L"./", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hCurrentDir == INVALID_HANDLE_VALUE) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to open current directory: %s\n", errMsg.c_str());
+    } else {
+        CloseHandle(hCurrentDir);
+    }
+    WIN32_FIND_DATAW findData;
+    auto hFind = FindFirstFileW(L"*", &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to find first file: %s\n", errMsg.c_str());
+    } else {
+        do {
+            std::wstring wFilename(findData.cFileName);
+            std::string filename;
+            wchar_util::wstr_to_str(filename, wFilename, CP_UTF8);
+            printf("Found file: %s, File Size: %llu, is_dir: %s\n", filename.c_str(), ((LONGLONG)findData.nFileSizeHigh << 32) | findData.nFileSizeLow, (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "true" : "false");
+        } while (FindNextFileW(hFind, &findData));
+        FindClose(hFind);
+    }
     return 0;
 }
