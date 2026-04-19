@@ -439,7 +439,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtReadFile(
         } else {
             bytesRead = file->read((uint8_t*)Buffer, Length);
         }
-        g_vfs.Log("Bytes read: %llu\n", bytesRead);
+        g_vfs.Log("Bytes read: %zu\n", bytesRead);
         if (bytesRead == 0) {
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = 0;
@@ -897,7 +897,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateSection(
                     Real_NtClose(hNewSection);
                     return STATUS_UNSUCCESSFUL;
                 }
-                g_vfs.Log("File content mapped to section successfully: %p, viewSize: %llu, fileSize: %llu, sectionSize: %llu, MaximumSize: %lld\n", pBase, viewSize, entry.original_size, sectionSize.QuadPart, MaximumSize ? MaximumSize->QuadPart : -1);
+                g_vfs.Log("File content mapped to section successfully: %p, viewSize: %zu, fileSize: %llu, sectionSize: %lld, MaximumSize: %lld\n", pBase, viewSize, entry.original_size, sectionSize.QuadPart, MaximumSize ? MaximumSize->QuadPart : -1);
                 status = Real_NtUnmapViewOfSection((HANDLE)-1, pBase);
                 if (status != STATUS_SUCCESS) {
                     g_vfs.Log("Failed to unmap view of section: %08X\n", status);
@@ -936,13 +936,13 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtMapViewOfSection(
     if (g_vfs.IsSectionHandle(SectionHandle)) {
         g_vfs.Log("NtMapViewOfSection: %p\n", SectionHandle);
         auto result = Real_NtMapViewOfSection(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect);
-        g_vfs.Log("Result: %08X, viewSize: %llu, SectionOffset: %lli\n", result, *ViewSize, SectionOffset ? SectionOffset->QuadPart : -1);
+        g_vfs.Log("Result: %08X, viewSize: %zu, SectionOffset: %lli\n", result, *ViewSize, SectionOffset ? SectionOffset->QuadPart : -1);
         if (!result) {
             FileEntry entry;
             Xp3Archive* archive;
             if (g_vfs.GetSectionInfo(SectionHandle, entry, archive)) {
                 *ViewSize = min(*ViewSize, (SIZE_T)(entry.original_size - (SectionOffset ? SectionOffset->QuadPart : 0)));
-                g_vfs.Log("Adjusted view size: %llu\n", *ViewSize);
+                g_vfs.Log("Adjusted view size: %zu\n", *ViewSize);
             }
         }
         return result;
@@ -982,6 +982,25 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryFullAttributesFile(
                 FileInformation->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
                 FileInformation->AllocationSize.QuadPart = entry.original_size;
                 FileInformation->EndOfFile.QuadPart = entry.original_size;
+                return STATUS_SUCCESS;
+            } else if (g_vfs.HasDirectory(filepath)) {
+                g_vfs.Log("Directory found in VFS: %s\n", filepath.c_str());
+                auto re = Real_NtQueryFullAttributesFile(ObjectAttributes, FileInformation);
+                if (re == STATUS_SUCCESS) {
+                    return re;
+                }
+                // Set creation, access, write, change time to current time for simplicity
+                FILETIME ft;
+                GetSystemTimeAsFileTime(&ft);
+                FileInformation->CreationTime.LowPart = ft.dwLowDateTime;
+                FileInformation->CreationTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastAccessTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastAccessTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastWriteTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastWriteTime.HighPart = ft.dwHighDateTime;
+                FileInformation->ChangeTime.LowPart = ft.dwLowDateTime;
+                FileInformation->ChangeTime.HighPart = ft.dwHighDateTime;
+                FileInformation->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_DIRECTORY;
                 return STATUS_SUCCESS;
             }
         }
@@ -1336,14 +1355,19 @@ VFS::VFS() {
     }
 }
 
+void CleanupCache(std::pair<HANDLE, FILE_INFORMATION_CLASS> info, void*& cache) {
+    if (info.second == FileBothDirectoryInformation) {
+        delete (DirEntriesCache<FILE_BOTH_DIR_INFORMATION>*)cache;
+    } else {
+        printf("Unknown cache type: %d\n", info.second);
+    }
+}
+
 VFS::~VFS() {
     Uninit();
+    Log("dir_entries_cache size: %zu\n", dir_entries_cache.size());
     for (auto& [info, cache]: dir_entries_cache) {
-        if (info.second == FileBothDirectoryInformation) {
-            delete (DirEntriesCache<FILE_BOTH_DIR_INFORMATION>*)cache;
-        } else {
-            printf("Unknown cache type: %d\n", info.second);
-        }
+        CleanupCache(info, cache);
     }
     for (auto archive : archives) {
         delete archive;
@@ -1630,6 +1654,16 @@ bool VFS::IsExistedDirHandle(HANDLE hDir) {
 
 void VFS::RemoveExistedDirHandle(HANDLE hDir) {
     existed_dir_handles.erase(hDir);
+    auto it = dir_entries_cache.begin();
+    while (it != dir_entries_cache.end()) {
+        if (it->first.first == hDir) {
+            Log("Removing cache for handle: %p, type: %d\n", hDir, it->first.second);
+            CleanupCache(it->first, it->second);
+            it = dir_entries_cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void VFS::AddEntry(std::string path) {

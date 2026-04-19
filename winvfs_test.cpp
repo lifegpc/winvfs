@@ -217,5 +217,16 @@ int main() {
         } while (FindNextFileW(hFind, &findData));
         FindClose(hFind);
     }
+    hFind = FindFirstFileW(L"meson-private\\*", &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to find first file with pattern: %s\n", errMsg.c_str());
+    } else {
+        FindClose(hFind);
+    }
+    if (fileop::exists("data")) {
+        printf("fileop::exists: data Directory exists\n");
+    }
     return 0;
 }
