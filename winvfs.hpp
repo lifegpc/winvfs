@@ -97,6 +97,12 @@ private:
     size_t pos = 0;
 };
 
+class DirEntry {
+public:
+    DirEntry(std::string name) : name(name) {}
+    std::string name;
+};
+
 class VFS {
 public:
     VFS();
@@ -150,6 +156,11 @@ public:
     bool GetFileEntry(std::string path, FileEntry& entry);
     bool HasDirectory(std::string path);
     bool GetDirectoryName(std::string path, std::string& name);
+    HANDLE OpenDirectory(std::string path);
+    void CloseDirectory(HANDLE hDir);
+    void AddDirectoryHandle(HANDLE hDir);
+    bool IsDirectoryHandle(HANDLE hDir);
+    void RemoveDirectoryHandle(HANDLE hDir);
 private:
     void AddEntry(std::string path);
     bool inited = false;
@@ -167,6 +178,7 @@ private:
     // second is DirEntriesCache<T>* , T is based on FILE_INFORMATION_CLASS
     std::unordered_map<std::pair<HANDLE, FILE_INFORMATION_CLASS>, void*, PairHasher> dir_entries_cache;
     std::unordered_map<std::string, std::vector<std::string>> directoryEntries;
+    std::unordered_set<HANDLE> dir_handles;
 };
 
 VFS& GetGlobalVFS();

@@ -342,7 +342,15 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
                     g_vfs.AddExistedDirHandle(*FileHandle, directoryName);
                     return status;
                 }
-                // TODO: Create fake handle
+                HANDLE hDir = g_vfs.OpenDirectory(directoryName);
+                if (hDir == INVALID_HANDLE_VALUE) {
+                    return STATUS_UNSUCCESSFUL;
+                }
+                *FileHandle = hDir;
+                IoStatusBlock->Status = FILE_OPENED;
+                IoStatusBlock->Information = 0;
+                g_vfs.Log("Directory opened successfully: %s. %p\n", filepath.c_str(), hDir);
+                return STATUS_SUCCESS;
             }
         }
     }
@@ -393,7 +401,15 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtOpenFile(
                     g_vfs.AddExistedDirHandle(*FileHandle, directoryName);
                     return status;
                 }
-                // TODO: Create fake handle
+                HANDLE hDir = g_vfs.OpenDirectory(directoryName);
+                if (hDir == INVALID_HANDLE_VALUE) {
+                    return STATUS_UNSUCCESSFUL;
+                }
+                *FileHandle = hDir;
+                IoStatusBlock->Status = FILE_OPENED;
+                IoStatusBlock->Information = 0;
+                g_vfs.Log("Directory opened successfully: %s. %p\n", filepath.c_str(), hDir);
+                return STATUS_SUCCESS;
             }
         }
     }
@@ -408,11 +424,15 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtClose(
         g_vfs.CloseFile(Handle);
         return STATUS_SUCCESS;
     }
+    if (g_vfs.IsDirectoryHandle(Handle)) {
+        g_vfs.Log("NtClose (directory handle): %p\n", Handle);
+        g_vfs.CloseDirectory(Handle);
+        return STATUS_SUCCESS;
+    }
     if (g_vfs.IsSectionHandle(Handle)) {
         g_vfs.Log("NtClose (section handle): %p\n", Handle);
         g_vfs.RemoveSectionHandle(Handle);
-    }
-    if (g_vfs.IsExistedDirHandle(Handle)) {
+    } else if (g_vfs.IsExistedDirHandle(Handle)) {
         g_vfs.Log("NtClose (existed dir handle): %p\n", Handle);
         g_vfs.RemoveExistedDirHandle(Handle);
     }
@@ -448,6 +468,8 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtReadFile(
             IoStatusBlock->Information = bytesRead;
         }
         return STATUS_SUCCESS;
+    } else if (g_vfs.IsDirectoryHandle(FileHandle)) {
+        return STATUS_UNSUCCESSFUL;
     }
     return Real_NtReadFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key);
 }
@@ -634,6 +656,177 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryInformationFile(
                 return STATUS_SUCCESS;
             }
         }
+    } else if (g_vfs.IsDirectoryHandle(FileHandle)) {
+        g_vfs.Log("NtQueryInformationFile (directory handle): %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        if (FileInformationClass == FileNameInformation || FileInformationClass == FileNormalizedNameInformation) {
+            if (Length < sizeof(FILE_NAME_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            auto hDir = (DirEntry*)FileHandle;
+            std::string path = hDir->name.substr(1); // Remove leading slash
+            if (path.back() == '/') {
+                path.pop_back();
+            }
+            path = g_vfs.GetRootPath(path);
+            std::wstring wDirectoryPath;
+            if (!wchar_util::str_to_wstr(wDirectoryPath, path, CP_UTF8)) {
+                return STATUS_UNSUCCESSFUL;
+            }
+            size_t nameLenBytes = wDirectoryPath.length() * sizeof(WCHAR);
+            size_t remainingSpaceBytes = Length - offsetof(FILE_NAME_INFORMATION, FileName);
+            size_t bytesToCopy = min(nameLenBytes, remainingSpaceBytes);
+            FILE_NAME_INFORMATION* info = (FILE_NAME_INFORMATION*)FileInformation;
+            info->FileNameLength = (ULONG)nameLenBytes;
+            memcpy(info->FileName, wDirectoryPath.c_str(), bytesToCopy);
+            if (nameLenBytes > remainingSpaceBytes) {
+                IoStatusBlock->Status = STATUS_BUFFER_OVERFLOW;
+                IoStatusBlock->Information = offsetof(FILE_NAME_INFORMATION, FileName) + nameLenBytes;
+                return STATUS_BUFFER_OVERFLOW;
+            } else {
+                IoStatusBlock->Status = STATUS_SUCCESS;
+                IoStatusBlock->Information = offsetof(FILE_NAME_INFORMATION, FileName) + nameLenBytes;
+                return STATUS_SUCCESS;
+            }
+        } else if (FileInformationClass == FileStandardInformation) {
+            if (Length < sizeof(FILE_STANDARD_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_STANDARD_INFORMATION* info = (FILE_STANDARD_INFORMATION*)FileInformation;
+            info->AllocationSize.QuadPart = 0;
+            info->EndOfFile.QuadPart = 0;
+            info->NumberOfLinks = 1;
+            info->DeletePending = FALSE;
+            info->Directory = TRUE;
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_STANDARD_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileBasicInformation) {
+            if (Length < sizeof(FILE_BASIC_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_BASIC_INFORMATION* info = (FILE_BASIC_INFORMATION*)FileInformation;
+            // Set creation, access, write, change time to current time for simplicity
+            FILETIME ft;
+            GetSystemTimeAsFileTime(&ft);
+            info->CreationTime.QuadPart = ft.dwLowDateTime | ((uint64_t)ft.dwHighDateTime << 32);
+            info->LastAccessTime.QuadPart = info->CreationTime.QuadPart;
+            info->LastWriteTime.QuadPart = info->CreationTime.QuadPart;
+            info->ChangeTime.QuadPart = info->CreationTime.QuadPart;
+            info->FileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_NORMAL;
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_BASIC_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileInternalInformation) {
+            if (Length < sizeof(FILE_INTERNAL_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_INTERNAL_INFORMATION* info = (FILE_INTERNAL_INFORMATION*)FileInformation;
+            info->IndexNumber.QuadPart = 0; // No real index number for directories
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_INTERNAL_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileEaInformation) {
+            if (Length < sizeof(FILE_EA_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_EA_INFORMATION* info = (FILE_EA_INFORMATION*)FileInformation;
+            info->EaSize = 0; // No extended attributes
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_EA_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileAccessInformation) {
+            if (Length < sizeof(FILE_ACCESS_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_ACCESS_INFORMATION* info = (FILE_ACCESS_INFORMATION*)FileInformation;
+            info->AccessFlags = READ_CONTROL | FILE_LIST_DIRECTORY;
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_ACCESS_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FilePositionInformation) {
+            if (Length < sizeof(FILE_POSITION_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_POSITION_INFORMATION* info = (FILE_POSITION_INFORMATION*)FileInformation;
+            info->CurrentByteOffset.QuadPart = 0; // Directories don't have a byte offset
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_POSITION_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileModeInformation) {
+            if (Length < sizeof(FILE_MODE_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_MODE_INFORMATION* info = (FILE_MODE_INFORMATION*)FileInformation;
+            info->Mode = 0; // No special mode
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_MODE_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileAlignmentInformation) {
+            if (Length < sizeof(FILE_ALIGNMENT_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_ALIGNMENT_INFORMATION* info = (FILE_ALIGNMENT_INFORMATION*)FileInformation;
+            info->AlignmentRequirement = FILE_BYTE_ALIGNMENT; // No special alignment requirement
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_ALIGNMENT_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileAllInformation) {
+            if (Length < sizeof(FILE_ALL_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            std::wstring wDirectoryPath;
+            auto hDir = (DirEntry*)FileHandle;
+            std::string path = hDir->name.substr(1); // Remove leading slash
+            if (path.back() == '/') {
+                path.pop_back();
+            }
+            path = g_vfs.GetRootPath(path);
+            if (!wchar_util::str_to_wstr(wDirectoryPath, path, CP_UTF8)) {
+                return STATUS_UNSUCCESSFUL;
+            }
+            FILE_ALL_INFORMATION* info = (FILE_ALL_INFORMATION*)FileInformation;
+            // Fill basic information
+            FILETIME ft;
+            GetSystemTimeAsFileTime(&ft);
+            info->BasicInformation.CreationTime.QuadPart = ft.dwLowDateTime | ((uint64_t)ft.dwHighDateTime << 32);
+            info->BasicInformation.LastAccessTime.QuadPart = info->BasicInformation.CreationTime.QuadPart;
+            info->BasicInformation.LastWriteTime.QuadPart = info->BasicInformation.CreationTime.QuadPart;
+            info->BasicInformation.ChangeTime.QuadPart = info->BasicInformation.CreationTime.QuadPart;
+            info->BasicInformation.FileAttributes = FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_NORMAL;
+            // Fill standard information
+            info->StandardInformation.AllocationSize.QuadPart = 0;
+            info->StandardInformation.EndOfFile.QuadPart = 0;
+            info->StandardInformation.NumberOfLinks = 1;
+            info->StandardInformation.DeletePending = FALSE;
+            info->StandardInformation.Directory = TRUE;
+            // Fill internal information
+            info->InternalInformation.IndexNumber.QuadPart = 0; // No real index number for directories
+            // Fill EA information
+            info->EaInformation.EaSize = 0; // No extended attributes
+            // Fill access information
+            info->AccessInformation.AccessFlags = READ_CONTROL | FILE_LIST_DIRECTORY;
+            // Fill position information
+            info->PositionInformation.CurrentByteOffset.QuadPart = 0; // Directories don't have a byte offset
+            // Fill mode information
+            info->ModeInformation.Mode = 0; // No special mode
+            // Fill alignment information
+            info->AlignmentInformation.AlignmentRequirement = FILE_BYTE_ALIGNMENT; // No special alignment requirement
+            // Fill name information
+            size_t nameLenBytes = wDirectoryPath.length() * sizeof(WCHAR);
+            size_t remainingSpaceBytes = Length - offsetof(FILE_ALL_INFORMATION, NameInformation.FileName);
+            size_t bytesToCopy = min(nameLenBytes, remainingSpaceBytes);
+            info->NameInformation.FileNameLength = (ULONG)nameLenBytes;
+            memcpy(info->NameInformation.FileName, wDirectoryPath.c_str(), bytesToCopy);
+            if (nameLenBytes > remainingSpaceBytes) {
+                IoStatusBlock->Status = STATUS_BUFFER_OVERFLOW;
+                IoStatusBlock->Information = offsetof(FILE_ALL_INFORMATION, NameInformation.FileName) + nameLenBytes;
+                return STATUS_BUFFER_OVERFLOW;
+            } else {
+                IoStatusBlock->Status = STATUS_SUCCESS;
+                IoStatusBlock->Information = offsetof(FILE_ALL_INFORMATION, NameInformation.FileName) + nameLenBytes;
+                return STATUS_SUCCESS;
+            }
+        }
     }
     if (g_vfs.InTrace(FileHandle)) {
         g_vfs.Log("NtQueryInformationFile (trace): %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
@@ -661,7 +854,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryVolumeInformationFile(
 ) {
     FileEntry entry;
     Xp3Archive* archive;
-    if (g_vfs.GetFileInfo(FileHandle, entry, archive)) {
+    if (g_vfs.GetFileInfo(FileHandle, entry, archive) || g_vfs.IsDirectoryHandle(FileHandle)) {
         g_vfs.Log("NtQueryVolumeInformationFile: %p, FsInformationClass: %d\n", FileHandle, FsInformationClass);
         if (FsInformationClass == FileFsVolumeInformation) {
             if (Length < sizeof(FILE_FS_VOLUME_INFORMATION)) {
@@ -716,33 +909,66 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryObject(
     IN ULONG ObjectInformationLength,
     OUT PULONG ReturnLength OPTIONAL
 ) {
-    FileEntry entry;
-    Xp3Archive* archive;
-    if (Handle != INVALID_HANDLE_VALUE && ObjectInformation && g_vfs.GetFileInfo(Handle, entry, archive)) {
-        g_vfs.Log("NtQueryObject: %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
-        if (ObjectInformationClass == ObjectNameInformation) {
-            std::string ntpath = g_vfs.GetNtPath(entry.filename);
-            g_vfs.Log("Object name for handle %p: %s\n", Handle, ntpath.c_str());
-            std::wstring wPath;
-            if (!wchar_util::str_to_wstr(wPath, ntpath, CP_UTF8)) {
-                return STATUS_UNSUCCESSFUL;
+    if (Handle != INVALID_HANDLE_VALUE && ObjectInformation) {
+        FileEntry entry;
+        Xp3Archive* archive;
+        if (g_vfs.GetFileInfo(Handle, entry, archive)) {
+            g_vfs.Log("NtQueryObject: %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
+            if (ObjectInformationClass == ObjectNameInformation) {
+                std::string ntpath = g_vfs.GetNtPath(entry.filename);
+                g_vfs.Log("Object name for handle %p: %s\n", Handle, ntpath.c_str());
+                std::wstring wPath;
+                if (!wchar_util::str_to_wstr(wPath, ntpath, CP_UTF8)) {
+                    return STATUS_UNSUCCESSFUL;
+                }
+                ULONG requiredLength = sizeof(OBJECT_NAME_INFORMATION) + (ULONG)((wPath.length() + 1) * sizeof(wchar_t));
+                if (ReturnLength) {
+                    *ReturnLength = requiredLength;
+                }
+                if (ObjectInformationLength < requiredLength) {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+                if (ObjectInformation) {
+                    POBJECT_NAME_INFORMATION pNameInfo = (POBJECT_NAME_INFORMATION)ObjectInformation;
+                    PWSTR destBuffer = (PWSTR)((PBYTE)ObjectInformation + sizeof(OBJECT_NAME_INFORMATION));
+                    memcpy(destBuffer, wPath.c_str(), wPath.length() * sizeof(wchar_t));
+                    destBuffer[wPath.length()] = L'\0';
+                    pNameInfo->Name.Length = (USHORT)(wPath.length() * sizeof(wchar_t));
+                    pNameInfo->Name.MaximumLength = (USHORT)((wPath.length() + 1) * sizeof(wchar_t));
+                    pNameInfo->Name.Buffer = destBuffer;
+                    return STATUS_SUCCESS;
+                }
             }
-            ULONG requiredLength = sizeof(OBJECT_NAME_INFORMATION) + (ULONG)((wPath.length() + 1) * sizeof(wchar_t));
-            if (ReturnLength) {
-                *ReturnLength = requiredLength;
-            }
-            if (ObjectInformationLength < requiredLength) {
-                return STATUS_INFO_LENGTH_MISMATCH;
-            }
-            if (ObjectInformation) {
-                POBJECT_NAME_INFORMATION pNameInfo = (POBJECT_NAME_INFORMATION)ObjectInformation;
-                PWSTR destBuffer = (PWSTR)((PBYTE)ObjectInformation + sizeof(OBJECT_NAME_INFORMATION));
-                memcpy(destBuffer, wPath.c_str(), wPath.length() * sizeof(wchar_t));
-                destBuffer[wPath.length()] = L'\0';
-                pNameInfo->Name.Length = (USHORT)(wPath.length() * sizeof(wchar_t));
-                pNameInfo->Name.MaximumLength = (USHORT)((wPath.length() + 1) * sizeof(wchar_t));
-                pNameInfo->Name.Buffer = destBuffer;
-                return STATUS_SUCCESS;
+        } else if (g_vfs.IsDirectoryHandle(Handle)) {
+            g_vfs.Log("NtQueryObject (directory handle): %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
+            if (ObjectInformationClass == ObjectNameInformation) {
+                auto hDir = (DirEntry*)Handle;
+                std::string path = hDir->name.substr(1); // Remove leading slash
+                if (path.back() == '/') {
+                    path.pop_back();
+                }
+                path = g_vfs.GetNtPath(path);
+                std::wstring wPath;
+                if (!wchar_util::str_to_wstr(wPath, path, CP_UTF8)) {
+                    return STATUS_UNSUCCESSFUL;
+                }
+                ULONG requiredLength = sizeof(OBJECT_NAME_INFORMATION) + (ULONG)((wPath.length() + 1) * sizeof(wchar_t));
+                if (ReturnLength) {
+                    *ReturnLength = requiredLength;
+                }
+                if (ObjectInformationLength < requiredLength) {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+                if (ObjectInformation) {
+                    POBJECT_NAME_INFORMATION pNameInfo = (POBJECT_NAME_INFORMATION)ObjectInformation;
+                    PWSTR destBuffer = (PWSTR)((PBYTE)ObjectInformation + sizeof(OBJECT_NAME_INFORMATION));
+                    memcpy(destBuffer, wPath.c_str(), wPath.length() * sizeof(wchar_t));
+                    destBuffer[wPath.length()] = L'\0';
+                    pNameInfo->Name.Length = (USHORT)(wPath.length() * sizeof(wchar_t));
+                    pNameInfo->Name.MaximumLength = (USHORT)((wPath.length() + 1) * sizeof(wchar_t));
+                    pNameInfo->Name.Buffer = destBuffer;
+                    return STATUS_SUCCESS;
+                }
             }
         }
     }
@@ -1242,7 +1468,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFileEx(
     IN ULONG QueryFlags,
     IN PUNICODE_STRING FileName OPTIONAL
 ) {
-    if (g_vfs.IsExistedDirHandle(FileHandle)) {
+    if (g_vfs.IsExistedDirHandle(FileHandle) || g_vfs.IsDirectoryHandle(FileHandle)) {
         g_vfs.Log("NtQueryDirectoryFileEx: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
         if (FileInformationClass == FileBothDirectoryInformation) {
             if (Length < sizeof(FILE_BOTH_DIR_INFORMATION)) {
@@ -1255,13 +1481,21 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFileEx(
             }
             if (!cache) {
                 cache = new DirEntriesCache<FILE_BOTH_DIR_INFORMATION>();
-                NTSTATUS status = CollectEntriesEx(FileHandle, FileInformationClass, FileName, QueryFlags, *cache);
-                if (status != STATUS_SUCCESS) {
-                    delete cache;
-                    return status;
+                bool isExistedHandle = g_vfs.IsExistedDirHandle(FileHandle);
+                std::string path;
+                NTSTATUS status;
+                if (isExistedHandle) {
+                    status = CollectEntriesEx(FileHandle, FileInformationClass, FileName, QueryFlags, *cache);
+                    if (status != STATUS_SUCCESS) {
+                        delete cache;
+                        return status;
+                    }
+                    path = g_vfs.GetExistedDirHandlePath(FileHandle);
+                } else {
+                    auto hDir = (DirEntry*)FileHandle;
+                    path = hDir->name;
                 }
-                auto path = g_vfs.GetExistedDirHandlePath(FileHandle);
-                status = GenerateEntries(*cache, path, FileName, std::function(GenFileBothDirInformation), true);
+                status = GenerateEntries(*cache, path, FileName, std::function(GenFileBothDirInformation), isExistedHandle);
                 if (status != STATUS_SUCCESS) {
                     delete cache;
                     return status;
@@ -1369,6 +1603,14 @@ VFS::~VFS() {
     for (auto& [info, cache]: dir_entries_cache) {
         CleanupCache(info, cache);
     }
+    Log("handle_map size: %zu\n", handle_map.size());
+    for (auto& [handle, _]: handle_map) {
+        delete (Xp3File*)handle;
+    }
+    Log("dir_handles size: %zu\n", dir_handles.size());
+    for (auto& handle: dir_handles) {
+        delete (DirEntry*)handle;
+    }
     for (auto archive : archives) {
         delete archive;
     }
@@ -1386,8 +1628,10 @@ bool VFS::AddArchive(const char* path) {
     archives.push_front(archive);
     for (auto entry: archive->files) {
         auto name = str_util::str_replace(entry.filename, "/", "\\");
+        if (files.find(name) == files.end()) {
+            AddEntry(str_util::str_replace(entry.filename, "\\", "/"));
+        }
         files[name] = std::pair(entry, archive);
-        AddEntry(str_util::str_replace(entry.filename, "\\", "/"));
     }
     return true;
 }
@@ -1763,4 +2007,41 @@ bool VFS::GetDirectoryName(std::string path, std::string& name) {
         name = rPath;
     }
     return ok;
+}
+
+HANDLE VFS::OpenDirectory(std::string path) {
+    auto hDir = new DirEntry(path);
+    if (!hDir) {
+        return INVALID_HANDLE_VALUE;
+    }
+    auto h = (HANDLE)hDir;
+    AddDirectoryHandle(h);
+    return h;
+}
+ 
+void VFS::AddDirectoryHandle(HANDLE hDir) {
+    dir_handles.insert(hDir);
+}
+
+bool VFS::IsDirectoryHandle(HANDLE hDir) {
+    return dir_handles.find(hDir) != dir_handles.end();
+}
+
+void VFS::RemoveDirectoryHandle(HANDLE hDir) {
+    dir_handles.erase(hDir);
+    auto it = dir_entries_cache.begin();
+    while (it != dir_entries_cache.end()) {
+        if (it->first.first == hDir) {
+            Log("Removing cache for handle: %p, type: %d\n", hDir, it->first.second);
+            CleanupCache(it->first, it->second);
+            it = dir_entries_cache.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void VFS::CloseDirectory(HANDLE hDir) {
+    RemoveDirectoryHandle(hDir);
+    delete (DirEntry*)hDir;
 }

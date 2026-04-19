@@ -164,6 +164,18 @@ int main() {
         err::get_winerror(errMsg, GetLastError());
         printf("Failed to open current directory: %s\n", errMsg.c_str());
     } else {
+        wchar_t fullPath[MAX_PATH];
+        DWORD ret = GetFinalPathNameByHandleW(hCurrentDir, fullPath, MAX_PATH, FILE_NAME_NORMALIZED);
+        if (ret == 0) {
+            std::string errMsg;
+            err::get_winerror(errMsg, GetLastError());
+            printf("Failed to get final path of current directory: %s\n", errMsg.c_str());
+        } else {
+            std::wstring wFullPath(fullPath, ret);
+            std::string strFullPath;
+            wchar_util::wstr_to_str(strFullPath, wFullPath, CP_UTF8);
+            printf("Final path of current directory: %s\n", strFullPath.c_str());
+        }
         CloseHandle(hCurrentDir);
     }
     WIN32_FIND_DATAW findData;
@@ -227,6 +239,59 @@ int main() {
     }
     if (fileop::exists("data")) {
         printf("fileop::exists: data Directory exists\n");
+    }
+    auto hDataDir = CreateFileW(L"data", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hDataDir == INVALID_HANDLE_VALUE) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to open data directory: %s\n", errMsg.c_str());
+    } else {
+        wchar_t fullPath[MAX_PATH];
+        DWORD ret = GetFinalPathNameByHandleW(hDataDir, fullPath, MAX_PATH, VOLUME_NAME_NT);
+        if (ret == 0) {
+            std::string errMsg;
+            err::get_winerror(errMsg, GetLastError());
+            printf("Failed to get final path of data directory: %s\n", errMsg.c_str());
+        } else {
+            std::wstring wFullPath(fullPath, ret);
+            std::string strFullPath;
+            wchar_util::wstr_to_str(strFullPath, wFullPath, CP_UTF8);
+            printf("Final path of data directory: %s\n", strFullPath.c_str());
+        }
+        CloseHandle(hDataDir);
+    }
+    bool existed;
+    if (fileop::isdir("data", existed) && existed) {
+        printf("fileop::isdir: data is a directory\n");
+    }
+    hFind = FindFirstFileW(L"data\\*", &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to find first file in data directory: %s\n", errMsg.c_str());
+    } else {
+        do {
+            std::wstring wFilename(findData.cFileName);
+            std::string filename;
+            wchar_util::wstr_to_str(filename, wFilename, CP_UTF8);
+            printf("Found file in data directory: %s, File Size: %llu, is_dir: %s\n", filename.c_str(), ((LONGLONG)findData.nFileSizeHigh << 32) | findData.nFileSizeLow, (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "true" : "false");
+        } while (FindNextFileW(hFind, &findData));
+        FindClose(hFind);
+    }
+    hFind = FindFirstFileW(L"data\\*", &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to find first file in data directory: %s\n", errMsg.c_str());
+    } else {
+        FindClose(hFind);
+    }
+    std::list<std::string> fileList;
+    if (fileop::listdir("data/fonts", fileList)) {
+        printf("Files in data/fonts directory:\n");
+        for (const auto& file : fileList) {
+            printf("%s\n", file.c_str());
+        }
     }
     return 0;
 }
