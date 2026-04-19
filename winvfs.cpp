@@ -1299,6 +1299,13 @@ VFS::VFS() {
 
 VFS::~VFS() {
     Uninit();
+    for (auto& [info, cache]: dir_entries_cache) {
+        if (info.second == FileBothDirectoryInformation) {
+            delete (DirEntriesCache<FILE_BOTH_DIR_INFORMATION>*)cache;
+        } else {
+            printf("Unknown cache type: %d\n", info.second);
+        }
+    }
     for (auto archive : archives) {
         delete archive;
     }
