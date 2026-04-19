@@ -268,6 +268,35 @@ typedef NTSTATUS(NTAPI* NtQueryDirectoryFileEx_t)(
 static NtQueryDirectoryFileEx_t Real_NtQueryDirectoryFileEx = nullptr;
 #define SL_RESTART_SCAN 0x00000001
 #define SL_RETURN_SINGLE_ENTRY 0x00000002
+#define FileDirectoryInformation 1
+typedef struct _FILE_DIRECTORY_INFORMATION {
+    ULONG         NextEntryOffset;
+    ULONG         FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         FileNameLength;
+    WCHAR         FileName[1];
+} FILE_DIRECTORY_INFORMATION, *PFILE_DIRECTORY_INFORMATION;
+#define FileFullDirectoryInformation 2
+typedef struct _FILE_FULL_DIR_INFORMATION {
+    ULONG         NextEntryOffset;
+    ULONG         FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         FileNameLength;
+    ULONG         EaSize;
+    WCHAR         FileName[1];
+} FILE_FULL_DIR_INFORMATION, *PFILE_FULL_DIR_INFORMATION;
 #define FileBothDirectoryInformation 3
 typedef struct _FILE_BOTH_DIR_INFORMATION {
     ULONG         NextEntryOffset;
@@ -285,6 +314,47 @@ typedef struct _FILE_BOTH_DIR_INFORMATION {
     WCHAR         ShortName[12];
     WCHAR         FileName[1];
 } FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
+#define FileNamesInformation 12
+typedef struct _FILE_NAMES_INFORMATION {
+    ULONG NextEntryOffset;
+    ULONG FileIndex;
+    ULONG FileNameLength;
+    WCHAR FileName[1];
+} FILE_NAMES_INFORMATION, *PFILE_NAMES_INFORMATION;
+#define FileIdBothDirectoryInformation 37
+typedef struct _FILE_ID_BOTH_DIR_INFORMATION {
+    ULONG         NextEntryOffset;
+    ULONG         FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         FileNameLength;
+    ULONG         EaSize;
+    CCHAR         ShortNameLength;
+    WCHAR         ShortName[12];
+    LARGE_INTEGER FileId;
+    WCHAR         FileName[1];
+} FILE_ID_BOTH_DIR_INFORMATION, *PFILE_ID_BOTH_DIR_INFORMATION;
+#define FileIdFullDirectoryInformation 38
+typedef struct _FILE_ID_FULL_DIR_INFORMATION {
+    ULONG         NextEntryOffset;
+    ULONG         FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         FileNameLength;
+    ULONG         EaSize;
+    LARGE_INTEGER FileId;
+    WCHAR         FileName[1];
+} FILE_ID_FULL_DIR_INFORMATION, *PFILE_ID_FULL_DIR_INFORMATION;
 typedef BOOLEAN(NTAPI* RtlIsNameInExpression_t)(
     IN PUNICODE_STRING Expression,
     IN PUNICODE_STRING Name,
@@ -1339,6 +1409,104 @@ NTSTATUS CollectEntriesEx(
     return STATUS_SUCCESS;
 }
 
+FILE_DIRECTORY_INFORMATION* GenFileDirectoryInformation(std::string& path, std::string entry) {
+    std::wstring wEntry;
+    if (!wchar_util::str_to_wstr(wEntry, entry, CP_UTF8)) {
+        return nullptr;
+    }
+    std::string fullPath = path + entry;
+    fullPath = fullPath.substr(1);
+    FileEntry fileEntry;
+    bool isDir = false;
+    bool found = g_vfs.GetFileEntry(fullPath, fileEntry);
+    if (wEntry.back() == '/') {
+        wEntry.pop_back();
+        isDir = true;
+    }
+    ULONG fileNameLength = (ULONG)(wEntry.length() * sizeof(WCHAR));
+    size_t entrySize = sizeof(FILE_DIRECTORY_INFORMATION) + fileNameLength;
+    FILE_DIRECTORY_INFORMATION* info = (FILE_DIRECTORY_INFORMATION*)malloc(entrySize);
+    if (!info) {
+        return nullptr;
+    }
+    ZeroMemory(info, entrySize);
+    info->NextEntryOffset = entrySize;
+    info->FileIndex = 0;
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    info->CreationTime.LowPart = ft.dwLowDateTime;
+    info->CreationTime.HighPart = ft.dwHighDateTime;
+    info->LastAccessTime.LowPart = ft.dwLowDateTime;
+    info->LastAccessTime.HighPart = ft.dwHighDateTime;
+    info->LastWriteTime.LowPart = ft.dwLowDateTime;
+    info->LastWriteTime.HighPart = ft.dwHighDateTime;
+    info->ChangeTime.LowPart = ft.dwLowDateTime;
+    info->ChangeTime.HighPart = ft.dwHighDateTime;
+    if (found) {
+        info->EndOfFile.QuadPart = fileEntry.original_size;
+        info->AllocationSize.QuadPart = fileEntry.original_size;
+    }
+    info->FileNameLength = fileNameLength;
+    info->FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    if (isDir) {
+        info->FileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
+    } else {
+        info->FileAttributes |= FILE_ATTRIBUTE_READONLY;
+    }
+    memcpy(info->FileName, wEntry.c_str(), fileNameLength);
+    info->FileName[info->FileNameLength / sizeof(WCHAR)] = L'\0';
+    return info;
+}
+
+FILE_FULL_DIR_INFORMATION* GenFileFullDirInformation(std::string& path, std::string entry) {
+    std::wstring wEntry;
+    if (!wchar_util::str_to_wstr(wEntry, entry, CP_UTF8)) {
+        return nullptr;
+    }
+    std::string fullPath = path + entry;
+    fullPath = fullPath.substr(1);
+    FileEntry fileEntry;
+    bool isDir = false;
+    bool found = g_vfs.GetFileEntry(fullPath, fileEntry);
+    if (wEntry.back() == '/') {
+        wEntry.pop_back();
+        isDir = true;
+    }
+    ULONG fileNameLength = (ULONG)(wEntry.length() * sizeof(WCHAR));
+    size_t entrySize = sizeof(FILE_FULL_DIR_INFORMATION) + fileNameLength;
+    FILE_FULL_DIR_INFORMATION* info = (FILE_FULL_DIR_INFORMATION*)malloc(entrySize);
+    if (!info) {
+        return nullptr;
+    }
+    ZeroMemory(info, entrySize);
+    info->NextEntryOffset = entrySize;
+    info->FileIndex = 0;
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    info->CreationTime.LowPart = ft.dwLowDateTime;
+    info->CreationTime.HighPart = ft.dwHighDateTime;
+    info->LastAccessTime.LowPart = ft.dwLowDateTime;
+    info->LastAccessTime.HighPart = ft.dwHighDateTime;
+    info->LastWriteTime.LowPart = ft.dwLowDateTime;
+    info->LastWriteTime.HighPart = ft.dwHighDateTime;
+    info->ChangeTime.LowPart = ft.dwLowDateTime;
+    info->ChangeTime.HighPart = ft.dwHighDateTime;
+    if (found) {
+        info->EndOfFile.QuadPart = fileEntry.original_size;
+        info->AllocationSize.QuadPart = fileEntry.original_size;
+    }
+    info->FileNameLength = fileNameLength;
+    info->FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    if (isDir) {
+        info->FileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
+    } else {
+        info->FileAttributes |= FILE_ATTRIBUTE_READONLY;
+    }
+    memcpy(info->FileName, wEntry.c_str(), fileNameLength);
+    info->FileName[info->FileNameLength / sizeof(WCHAR)] = L'\0';
+    return info;
+}
+
 FILE_BOTH_DIR_INFORMATION* GenFileBothDirInformation(std::string& path, std::string entry) {
     std::wstring wEntry;
     if (!wchar_util::str_to_wstr(wEntry, entry, CP_UTF8)) {
@@ -1390,12 +1558,140 @@ FILE_BOTH_DIR_INFORMATION* GenFileBothDirInformation(std::string& path, std::str
     return info;
 }
 
+FILE_NAMES_INFORMATION* GenFileNamesInformation(std::string& path, std::string entry) {
+    std::wstring wEntry;
+    if (!wchar_util::str_to_wstr(wEntry, entry, CP_UTF8)) {
+        return nullptr;
+    }
+    std::string fullPath = path + entry;
+    fullPath = fullPath.substr(1);
+    FileEntry fileEntry;
+    bool isDir = false;
+    bool found = g_vfs.GetFileEntry(fullPath, fileEntry);
+    if (wEntry.back() == '/') {
+        wEntry.pop_back();
+        isDir = true;
+    }
+    ULONG fileNameLength = (ULONG)(wEntry.length() * sizeof(WCHAR));
+    size_t entrySize = sizeof(FILE_NAMES_INFORMATION) + fileNameLength;
+    FILE_NAMES_INFORMATION* info = (FILE_NAMES_INFORMATION*)malloc(entrySize);
+    if (!info) {
+        return nullptr;
+    }
+    ZeroMemory(info, entrySize);
+    info->NextEntryOffset = entrySize;
+    info->FileIndex = 0;
+    memcpy(info->FileName, wEntry.c_str(), fileNameLength);
+    info->FileName[info->FileNameLength / sizeof(WCHAR)] = L'\0';
+    return info;
+}
+
+FILE_ID_BOTH_DIR_INFORMATION* GenFileIdBothDirInformation(std::string& path, std::string entry) {
+    std::wstring wEntry;
+    if (!wchar_util::str_to_wstr(wEntry, entry, CP_UTF8)) {
+        return nullptr;
+    }
+    std::string fullPath = path + entry;
+    fullPath = fullPath.substr(1);
+    FileEntry fileEntry;
+    bool isDir = false;
+    bool found = g_vfs.GetFileEntry(fullPath, fileEntry);
+    if (wEntry.back() == '/') {
+        wEntry.pop_back();
+        isDir = true;
+    }
+    ULONG fileNameLength = (ULONG)(wEntry.length() * sizeof(WCHAR));
+    size_t entrySize = sizeof(FILE_ID_BOTH_DIR_INFORMATION) + fileNameLength;
+    FILE_ID_BOTH_DIR_INFORMATION* info = (FILE_ID_BOTH_DIR_INFORMATION*)malloc(entrySize);
+    if (!info) {
+        return nullptr;
+    }
+    ZeroMemory(info, entrySize);
+    info->NextEntryOffset = entrySize;
+    info->FileIndex = 0;
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    info->CreationTime.LowPart = ft.dwLowDateTime;
+    info->CreationTime.HighPart = ft.dwHighDateTime;
+    info->LastAccessTime.LowPart = ft.dwLowDateTime;
+    info->LastAccessTime.HighPart = ft.dwHighDateTime;
+    info->LastWriteTime.LowPart = ft.dwLowDateTime;
+    info->LastWriteTime.HighPart = ft.dwHighDateTime;
+    info->ChangeTime.LowPart = ft.dwLowDateTime;
+    info->ChangeTime.HighPart = ft.dwHighDateTime;
+    if (found) {
+        info->EndOfFile.QuadPart = fileEntry.original_size;
+        info->AllocationSize.QuadPart = fileEntry.original_size;
+        info->FileId.QuadPart = fileEntry.adler32;
+    }
+    info->FileNameLength = fileNameLength;
+    info->FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    if (isDir) {
+        info->FileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
+    } else {
+        info->FileAttributes |= FILE_ATTRIBUTE_READONLY;
+    }
+    memcpy(info->FileName, wEntry.c_str(), fileNameLength);
+    info->FileName[info->FileNameLength / sizeof(WCHAR)] = L'\0';
+    return info;
+}
+
+FILE_ID_FULL_DIR_INFORMATION* GenFileIdFullDirInformation(std::string& path, std::string entry) {
+    std::wstring wEntry;
+    if (!wchar_util::str_to_wstr(wEntry, entry, CP_UTF8)) {
+        return nullptr;
+    }
+    std::string fullPath = path + entry;
+    fullPath = fullPath.substr(1);
+    FileEntry fileEntry;
+    bool isDir = false;
+    bool found = g_vfs.GetFileEntry(fullPath, fileEntry);
+    if (wEntry.back() == '/') {
+        wEntry.pop_back();
+        isDir = true;
+    }
+    ULONG fileNameLength = (ULONG)(wEntry.length() * sizeof(WCHAR));
+    size_t entrySize = sizeof(FILE_ID_FULL_DIR_INFORMATION) + fileNameLength;
+    FILE_ID_FULL_DIR_INFORMATION* info = (FILE_ID_FULL_DIR_INFORMATION*)malloc(entrySize);
+    if (!info) {
+        return nullptr;
+    }
+    ZeroMemory(info, entrySize);
+    info->NextEntryOffset = entrySize;
+    info->FileIndex = 0;
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    info->CreationTime.LowPart = ft.dwLowDateTime;
+    info->CreationTime.HighPart = ft.dwHighDateTime;
+    info->LastAccessTime.LowPart = ft.dwLowDateTime;
+    info->LastAccessTime.HighPart = ft.dwHighDateTime;
+    info->LastWriteTime.LowPart = ft.dwLowDateTime;
+    info->LastWriteTime.HighPart = ft.dwHighDateTime;
+    info->ChangeTime.LowPart = ft.dwLowDateTime;
+    info->ChangeTime.HighPart = ft.dwHighDateTime;
+    if (found) {
+        info->EndOfFile.QuadPart = fileEntry.original_size;
+        info->AllocationSize.QuadPart = fileEntry.original_size;
+        info->FileId.QuadPart = fileEntry.adler32;
+    }
+    info->FileNameLength = fileNameLength;
+    info->FileAttributes = FILE_ATTRIBUTE_NORMAL;
+    if (isDir) {
+        info->FileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
+    } else {
+        info->FileAttributes |= FILE_ATTRIBUTE_READONLY;
+    }
+    memcpy(info->FileName, wEntry.c_str(), fileNameLength);
+    info->FileName[info->FileNameLength / sizeof(WCHAR)] = L'\0';
+    return info;
+}
+
 template <typename T>
 NTSTATUS GenerateEntries(
     DirEntriesCache<T>& entries,
     std::string path,
     IN PUNICODE_STRING FileName,
-    std::function<T*(std::string&,std::string)>&& callback,
+    std::function<T*(std::string&,std::string)> callback,
     bool replace = false
 ) {
     auto& flist = g_vfs.GetDirectoryEntries(path);
@@ -1456,6 +1752,96 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFile(
     return Real_NtQueryDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length, FileInformationClass, ReturnSingleEntry, FileName, RestartScan);
 }
 
+template <typename T>
+NTSTATUS NtQueryDirectoryFileExInternel(
+    HANDLE FileHandle,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    PVOID FileInformation,
+    ULONG Length,
+    FILE_INFORMATION_CLASS FileInformationClass,
+    ULONG QueryFlags,
+    PUNICODE_STRING FileName,
+    std::function<T*(std::string&,std::string)> callback
+) {
+    if (Length < sizeof(T)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    auto cache = g_vfs.GetDirEntriesCache<T>(FileHandle, FileInformationClass);
+    if (cache && (QueryFlags & SL_RESTART_SCAN)) {
+        g_vfs.RemoveDirEntriesCache<T>(FileHandle, FileInformationClass);
+        cache = nullptr;
+    }
+    if (!cache) {
+        cache = new DirEntriesCache<T>();
+        bool isExistedHandle = g_vfs.IsExistedDirHandle(FileHandle);
+        std::string path;
+        NTSTATUS status;
+        if (isExistedHandle) {
+            status = CollectEntriesEx<T>(FileHandle, FileInformationClass, FileName, QueryFlags, *cache);
+            if (status != STATUS_SUCCESS) {
+                delete cache;
+                return status;
+            }
+            path = g_vfs.GetExistedDirHandlePath(FileHandle);
+        } else {
+            auto hDir = (DirEntry*)FileHandle;
+            path = hDir->name;
+        }
+        status = GenerateEntries<T>(*cache, path, FileName, callback, isExistedHandle);
+        if (status != STATUS_SUCCESS) {
+            delete cache;
+            return status;
+        }
+        if (cache->empty()) {
+            delete cache;
+            IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
+            IoStatusBlock->Information = 0;
+            return STATUS_NO_SUCH_FILE;
+        }
+        g_vfs.AddDirEntriesCache<T>(FileHandle, FileInformationClass, cache);
+    }
+    bool SingleEntry = (QueryFlags & SL_RETURN_SINGLE_ENTRY) != 0;
+    auto entry = cache->peek_one();
+    if (!entry) {
+        g_vfs.RemoveDirEntriesCache<T>(FileHandle, FileInformationClass);
+        IoStatusBlock->Status = STATUS_NO_MORE_FILES;
+        IoStatusBlock->Information = 0;
+        return STATUS_NO_MORE_FILES;
+    }
+    ULONG offset = 0;
+    ULONG preOffset = 0;
+    do {
+        ULONG entrySize = entry->NextEntryOffset;
+        if (offset + entrySize > Length) {
+            if (offset == 0) {
+                // The buffer is too small to hold even a single entry
+                IoStatusBlock->Status = STATUS_BUFFER_OVERFLOW;
+                IoStatusBlock->Information = entrySize;
+                return STATUS_BUFFER_OVERFLOW;
+            } else {
+                // Return the entries that can fit in the buffer
+                break;
+            }
+        }
+        preOffset = offset;
+        offset += entrySize;
+        memcpy((BYTE*)FileInformation + preOffset, entry, entrySize);
+        cache->inc_one();
+        if (SingleEntry) {
+            break;
+        }
+        entry = cache->peek_one();
+    } while (entry);
+    auto status = STATUS_SUCCESS;
+    if (offset > 0) {
+        ULONG* dest = (ULONG*)((BYTE*)FileInformation + preOffset);
+        *dest = 0;
+    }
+    IoStatusBlock->Status = STATUS_SUCCESS;
+    IoStatusBlock->Information = offset;
+    return STATUS_SUCCESS;
+}
+
 __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFileEx(
     IN HANDLE FileHandle,
     IN HANDLE Event OPTIONAL,
@@ -1471,83 +1857,17 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFileEx(
     if (g_vfs.IsExistedDirHandle(FileHandle) || g_vfs.IsDirectoryHandle(FileHandle)) {
         g_vfs.Log("NtQueryDirectoryFileEx: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
         if (FileInformationClass == FileBothDirectoryInformation) {
-            if (Length < sizeof(FILE_BOTH_DIR_INFORMATION)) {
-                return STATUS_BUFFER_TOO_SMALL;
-            }
-            auto cache = g_vfs.GetDirEntriesCache<FILE_BOTH_DIR_INFORMATION>(FileHandle, FileInformationClass);
-            if (cache && (QueryFlags & SL_RESTART_SCAN)) {
-                g_vfs.RemoveDirEntriesCache<FILE_BOTH_DIR_INFORMATION>(FileHandle, FileInformationClass);
-                cache = nullptr;
-            }
-            if (!cache) {
-                cache = new DirEntriesCache<FILE_BOTH_DIR_INFORMATION>();
-                bool isExistedHandle = g_vfs.IsExistedDirHandle(FileHandle);
-                std::string path;
-                NTSTATUS status;
-                if (isExistedHandle) {
-                    status = CollectEntriesEx(FileHandle, FileInformationClass, FileName, QueryFlags, *cache);
-                    if (status != STATUS_SUCCESS) {
-                        delete cache;
-                        return status;
-                    }
-                    path = g_vfs.GetExistedDirHandlePath(FileHandle);
-                } else {
-                    auto hDir = (DirEntry*)FileHandle;
-                    path = hDir->name;
-                }
-                status = GenerateEntries(*cache, path, FileName, std::function(GenFileBothDirInformation), isExistedHandle);
-                if (status != STATUS_SUCCESS) {
-                    delete cache;
-                    return status;
-                }
-                if (cache->empty()) {
-                    delete cache;
-                    IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
-                    IoStatusBlock->Information = 0;
-                    return STATUS_NO_SUCH_FILE;
-                }
-                g_vfs.AddDirEntriesCache(FileHandle, FileInformationClass, cache);
-            }
-            bool SingleEntry = (QueryFlags & SL_RETURN_SINGLE_ENTRY) != 0;
-            auto entry = cache->peek_one();
-            if (!entry) {
-                g_vfs.RemoveDirEntriesCache<FILE_BOTH_DIR_INFORMATION>(FileHandle, FileInformationClass);
-                IoStatusBlock->Status = STATUS_NO_MORE_FILES;
-                IoStatusBlock->Information = 0;
-                return STATUS_NO_MORE_FILES;
-            }
-            ULONG offset = 0;
-            ULONG preOffset = 0;
-            do {
-                ULONG entrySize = entry->NextEntryOffset;
-                if (offset + entrySize > Length) {
-                    if (offset == 0) {
-                        // The buffer is too small to hold even a single entry
-                        IoStatusBlock->Status = STATUS_BUFFER_OVERFLOW;
-                        IoStatusBlock->Information = entrySize;
-                        return STATUS_BUFFER_OVERFLOW;
-                    } else {
-                        // Return the entries that can fit in the buffer
-                        break;
-                    }
-                }
-                preOffset = offset;
-                offset += entrySize;
-                memcpy((BYTE*)FileInformation + preOffset, entry, entrySize);
-                cache->inc_one();
-                if (SingleEntry) {
-                    break;
-                }
-                entry = cache->peek_one();
-            } while (entry);
-            auto status = STATUS_SUCCESS;
-            if (offset > 0) {
-                ULONG* dest = (ULONG*)((BYTE*)FileInformation + preOffset);
-                *dest = 0;
-            }
-            IoStatusBlock->Status = STATUS_SUCCESS;
-            IoStatusBlock->Information = offset;
-            return STATUS_SUCCESS;
+            return NtQueryDirectoryFileExInternel<FILE_BOTH_DIR_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName, GenFileBothDirInformation);
+        } else if (FileInformationClass == FileDirectoryInformation) {
+            return NtQueryDirectoryFileExInternel<FILE_DIRECTORY_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName, GenFileDirectoryInformation);
+        } else if (FileInformationClass == FileFullDirectoryInformation) {
+            return NtQueryDirectoryFileExInternel<FILE_FULL_DIR_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName, GenFileFullDirInformation);
+        } else if (FileInformationClass == FileNamesInformation) {
+            return NtQueryDirectoryFileExInternel<FILE_NAMES_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName, GenFileNamesInformation);
+        } else if (FileInformationClass == FileIdBothDirectoryInformation) {
+            return NtQueryDirectoryFileExInternel<FILE_ID_BOTH_DIR_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName, GenFileIdBothDirInformation);
+        } else if (FileInformationClass == FileIdFullDirectoryInformation) {
+            return NtQueryDirectoryFileExInternel<FILE_ID_FULL_DIR_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName, GenFileIdFullDirInformation);
         }
     }
     return Real_NtQueryDirectoryFileEx(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName);
@@ -1592,6 +1912,16 @@ VFS::VFS() {
 void CleanupCache(std::pair<HANDLE, FILE_INFORMATION_CLASS> info, void*& cache) {
     if (info.second == FileBothDirectoryInformation) {
         delete (DirEntriesCache<FILE_BOTH_DIR_INFORMATION>*)cache;
+    } else if (info.second == FileDirectoryInformation) {
+        delete (DirEntriesCache<FILE_DIRECTORY_INFORMATION>*)cache;
+    } else if (info.second == FileFullDirectoryInformation) {
+        delete (DirEntriesCache<FILE_FULL_DIR_INFORMATION>*)cache;
+    } else if (info.second == FileNamesInformation) {
+        delete (DirEntriesCache<FILE_NAMES_INFORMATION>*)cache;
+    } else if (info.second == FileIdBothDirectoryInformation) {
+        delete (DirEntriesCache<FILE_ID_BOTH_DIR_INFORMATION>*)cache;
+    } else if (info.second == FileIdFullDirectoryInformation) {
+        delete (DirEntriesCache<FILE_ID_FULL_DIR_INFORMATION>*)cache;
     } else {
         printf("Unknown cache type: %d\n", info.second);
     }
