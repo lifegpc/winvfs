@@ -318,6 +318,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
             g_vfs.Log("NtCreateFile: %s\n", filepath.c_str());
             FileEntry entry;
             Xp3Archive* archive;
+            std::string directoryName;
             if (g_vfs.GetEntry(filepath, entry, archive)) {
                 g_vfs.Log("File found in VFS: %s\n", filepath.c_str());
                 auto hFile = g_vfs.OpenFile(entry, archive);
@@ -334,6 +335,14 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
                     g_vfs.AddExistedDirHandle(*FileHandle, "/");
                 }
                 return status;
+            } else if (g_vfs.GetDirectoryName(filepath, directoryName)) {
+                g_vfs.Log("Directory found in VFS: %s\n", filepath.c_str());
+                auto status = Real_NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
+                if (status == STATUS_SUCCESS) {
+                    g_vfs.AddExistedDirHandle(*FileHandle, directoryName);
+                    return status;
+                }
+                // TODO: Create fake handle
             }
         }
     }
@@ -360,6 +369,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtOpenFile(
             g_vfs.Log("NtOpenFile: %s\n", filepath.c_str());
             FileEntry entry;
             Xp3Archive* archive;
+            std::string directoryName;
             if (g_vfs.GetEntry(filepath, entry, archive)) {
                 g_vfs.Log("File found in VFS: %s\n", filepath.c_str());
                 auto hFile = g_vfs.OpenFile(entry, archive);
@@ -376,6 +386,14 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtOpenFile(
                     g_vfs.AddExistedDirHandle(*FileHandle, "/");
                 }
                 return status;
+            } else if (g_vfs.GetDirectoryName(filepath, directoryName)) {
+                g_vfs.Log("Directory found in VFS: %s\n", filepath.c_str());
+                auto status = Real_NtOpenFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, ShareAccess, OpenOptions);
+                if (status == STATUS_SUCCESS) {
+                    g_vfs.AddExistedDirHandle(*FileHandle, directoryName);
+                    return status;
+                }
+                // TODO: Create fake handle
             }
         }
     }
@@ -765,6 +783,25 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryAttributesFile(
                 FileInformation->ChangeTime.HighPart = ft.dwHighDateTime;
                 FileInformation->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
                 return STATUS_SUCCESS;
+            } else if (g_vfs.HasDirectory(filepath)) {
+                g_vfs.Log("Directory found in VFS: %s\n", filepath.c_str());
+                auto re = Real_NtQueryAttributesFile(ObjectAttributes, FileInformation);
+                if (re == STATUS_SUCCESS) {
+                    return re;
+                }
+                // Set creation, access, write, change time to current time for simplicity
+                FILETIME ft;
+                GetSystemTimeAsFileTime(&ft);
+                FileInformation->CreationTime.LowPart = ft.dwLowDateTime;
+                FileInformation->CreationTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastAccessTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastAccessTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastWriteTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastWriteTime.HighPart = ft.dwHighDateTime;
+                FileInformation->ChangeTime.LowPart = ft.dwLowDateTime;
+                FileInformation->ChangeTime.HighPart = ft.dwHighDateTime;
+                FileInformation->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_DIRECTORY;
+                return STATUS_SUCCESS;
             }
         }
     }
@@ -1095,9 +1132,11 @@ FILE_BOTH_DIR_INFORMATION* GenFileBothDirInformation(std::string& path, std::str
         info->AllocationSize.QuadPart = fileEntry.original_size;
     }
     info->FileNameLength = fileNameLength;
-    info->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
+    info->FileAttributes = FILE_ATTRIBUTE_NORMAL;
     if (isDir) {
         info->FileAttributes |= FILE_ATTRIBUTE_DIRECTORY;
+    } else {
+        info->FileAttributes |= FILE_ATTRIBUTE_READONLY;
     }
     info->EaSize = 0;
     info->ShortNameLength = 0;
@@ -1640,4 +1679,54 @@ bool VFS::GetFileEntry(std::string path, FileEntry& entry) {
         return true;
     }
     return false;
+}
+
+bool VFS::HasDirectory(std::string path) {
+    std::string rPath;
+    if (str_util::str_startswith(path, dos_path)) {
+        rPath = path.substr(dos_path.length());
+    } else if (str_util::str_startswith(path, dos_system_path)) {
+        rPath = path.substr(dos_system_path.length());
+    } else if (str_util::str_startswith(path, guid_path)) {
+        rPath = path.substr(guid_path.length());
+    } else if (str_util::str_startswith(path, nt_path)) {
+        rPath = path.substr(nt_path.length());
+    } else if (str_util::str_startswith(path, base_path)) {
+        rPath = path.substr(base_path.length());
+    } else {
+        return false;
+    }
+    rPath = str_util::str_replace(rPath, "\\", "/");
+    rPath.insert(0, "/");
+    if (rPath.back() != '/') {
+        rPath.push_back('/');
+    }
+    return directoryEntries.find(rPath) != directoryEntries.end();
+}
+
+bool VFS::GetDirectoryName(std::string path, std::string& name) {
+    std::string rPath;
+    if (str_util::str_startswith(path, dos_path)) {
+        rPath = path.substr(dos_path.length());
+    } else if (str_util::str_startswith(path, dos_system_path)) {
+        rPath = path.substr(dos_system_path.length());
+    } else if (str_util::str_startswith(path, guid_path)) {
+        rPath = path.substr(guid_path.length());
+    } else if (str_util::str_startswith(path, nt_path)) {
+        rPath = path.substr(nt_path.length());
+    } else if (str_util::str_startswith(path, base_path)) {
+        rPath = path.substr(base_path.length());
+    } else {
+        return false;
+    }
+    rPath = str_util::str_replace(rPath, "\\", "/");
+    rPath.insert(0, "/");
+    if (rPath.back() != '/') {
+        rPath.push_back('/');
+    }
+    bool ok = directoryEntries.find(rPath) != directoryEntries.end();
+    if (ok) {
+        name = rPath;
+    }
+    return ok;
 }

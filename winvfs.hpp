@@ -148,6 +148,8 @@ public:
     }
     std::vector<std::string>& GetDirectoryEntries(std::string path);
     bool GetFileEntry(std::string path, FileEntry& entry);
+    bool HasDirectory(std::string path);
+    bool GetDirectoryName(std::string path, std::string& name);
 private:
     void AddEntry(std::string path);
     bool inited = false;

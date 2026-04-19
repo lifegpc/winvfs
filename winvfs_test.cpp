@@ -195,5 +195,27 @@ int main() {
         } while (FindNextFileW(hFind, &findData));
         FindClose(hFind);
     }
+    auto dirAttrs = GetFileAttributesW(L"data");
+    if (dirAttrs == INVALID_FILE_ATTRIBUTES) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to get directory attributes: %s\n", errMsg.c_str());
+    } else {
+        printf("Directory attributes: 0x%08X\n", dirAttrs);
+    }
+    hFind = FindFirstFileW(L"meson-private\\*.txt", &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to find first file with pattern: %s\n", errMsg.c_str());
+    } else {
+        do {
+            std::wstring wFilename(findData.cFileName);
+            std::string filename;
+            wchar_util::wstr_to_str(filename, wFilename, CP_UTF8);
+            printf("Found file with pattern: %s, File Size: %llu, is_dir: %s\n", filename.c_str(), ((LONGLONG)findData.nFileSizeHigh << 32) | findData.nFileSizeLow, (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "true" : "false");
+        } while (FindNextFileW(hFind, &findData));
+        FindClose(hFind);
+    }
     return 0;
 }
