@@ -17,6 +17,7 @@ VFS& GetGlobalVFS() {
 #define STATUS_NO_MORE_FILES ((NTSTATUS)0x80000006L)
 #define STATUS_UNSUCCESSFUL ((NTSTATUS)0xC0000001L)
 #define STATUS_INFO_LENGTH_MISMATCH ((NTSTATUS)0xC0000004L)
+#define STATUS_NO_SUCH_FILE ((NTSTATUS)0xC000000FL)
 #define STATUS_BUFFER_TOO_SMALL ((NTSTATUS)0xC0000023L)
 #define STATUS_INSUFFICIENT_RESOURCES ((NTSTATUS)0xC000009AL)
 
@@ -284,6 +285,13 @@ typedef struct _FILE_BOTH_DIR_INFORMATION {
     WCHAR         ShortName[12];
     WCHAR         FileName[1];
 } FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
+typedef BOOLEAN(NTAPI* RtlIsNameInExpression_t)(
+    IN PUNICODE_STRING Expression,
+    IN PUNICODE_STRING Name,
+    IN BOOLEAN IgnoreCase,
+    IN PWCHAR  UpcaseTable OPTIONAL
+);
+static RtlIsNameInExpression_t Real_RtlIsNameInExpression = nullptr;
 
 __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
     OUT PHANDLE FileHandle,
@@ -984,7 +992,7 @@ NTSTATUS CollectEntries(
                 offset += nextOffset;
             }
             RestartScan = FALSE;
-        } else if (status != STATUS_NO_MORE_FILES) {
+        } else if (status != STATUS_NO_MORE_FILES && status != STATUS_NO_SUCH_FILE) {
             free(Buffer);
             return status;
         }
@@ -1040,7 +1048,7 @@ NTSTATUS CollectEntriesEx(
                 offset += nextOffset;
             }
             RestartScan = 0;
-        } else if (status != STATUS_NO_MORE_FILES) {
+        } else if (status != STATUS_NO_MORE_FILES && status != STATUS_NO_SUCH_FILE) {
             free(Buffer);
             return status;
         }
@@ -1098,16 +1106,44 @@ FILE_BOTH_DIR_INFORMATION* GenFileBothDirInformation(std::string& path, std::str
     return info;
 }
 
-// TODO: Filter entries based on FileName
 template <typename T>
 NTSTATUS GenerateEntries(
     DirEntriesCache<T>& entries,
     std::string path,
+    IN PUNICODE_STRING FileName,
     std::function<T*(std::string&,std::string)>&& callback,
     bool replace = false
 ) {
-    auto flist = g_vfs.GetDirectoryEntries(path);
+    auto& flist = g_vfs.GetDirectoryEntries(path);
+    std::wstring wFileName;
+    UNICODE_STRING pattern;
+    if (FileName) {
+        wFileName.assign(FileName->Buffer, FileName->Length / sizeof(WCHAR));
+        // Convert to upper case
+        for (auto& ch : wFileName) {
+            ch = towupper(ch);
+        }
+        pattern.Length = (USHORT)wFileName.length() * sizeof(WCHAR);
+        pattern.MaximumLength = pattern.Length + sizeof(WCHAR);
+        pattern.Buffer = (PWSTR)wFileName.c_str();
+    }
     for (auto& entry : flist) {
+        if (FileName) {
+            std::wstring wEntry;
+            if (!wchar_util::str_to_wstr(wEntry, entry, CP_UTF8)) {
+                return STATUS_UNSUCCESSFUL;
+            }
+            if (wEntry.back() == L'/') {
+                wEntry.pop_back();
+            }
+            UNICODE_STRING s;
+            s.Length = (USHORT)(wEntry.length() * sizeof(WCHAR));
+            s.MaximumLength = s.Length + sizeof(WCHAR);
+            s.Buffer = (PWSTR)wEntry.c_str();
+            if (!Real_RtlIsNameInExpression(&pattern, &s, TRUE, NULL)) {
+                continue;
+            }
+        }
         T* info = callback(path, entry);
         if (!info) {
             return STATUS_UNSUCCESSFUL;
@@ -1167,10 +1203,16 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFileEx(
                     return status;
                 }
                 auto path = g_vfs.GetExistedDirHandlePath(FileHandle);
-                status = GenerateEntries(*cache, path, std::function(GenFileBothDirInformation), true);
+                status = GenerateEntries(*cache, path, FileName, std::function(GenFileBothDirInformation), true);
                 if (status != STATUS_SUCCESS) {
                     delete cache;
                     return status;
+                }
+                if (cache->empty()) {
+                    delete cache;
+                    IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
+                    IoStatusBlock->Information = 0;
+                    return STATUS_NO_SUCH_FILE;
                 }
                 g_vfs.AddDirEntriesCache(FileHandle, FileInformationClass, cache);
             }
@@ -1349,6 +1391,10 @@ bool VFS::Init() {
         return false;
     }
     Real_NtQueryDirectoryFileEx = (decltype(Real_NtQueryDirectoryFileEx))GetProcAddress(hModule, "NtQueryDirectoryFileEx");
+    Real_RtlIsNameInExpression = (decltype(Real_RtlIsNameInExpression))GetProcAddress(hModule, "RtlIsNameInExpression");
+    if (!Real_RtlIsNameInExpression) {
+        return false;
+    }
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&Real_NtCreateFile, Hooked_NtCreateFile);

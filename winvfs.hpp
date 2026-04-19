@@ -89,6 +89,9 @@ public:
     inline bool isEnd() const {
         return pos >= entries.size();
     }
+    inline bool empty() const {
+        return entries.empty();
+    }
 private:
     std::vector<T*> entries;
     size_t pos = 0;
