@@ -3,6 +3,78 @@
 #include "err.h"
 #include "wchar_util.h"
 
+typedef NTSTATUS(NTAPI* NtQueryDirectoryFile_t)(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    OUT PVOID FileInformation,
+    IN ULONG Length,
+    IN FILE_INFORMATION_CLASS FileInformationClass,
+    IN BOOLEAN ReturnSingleEntry,
+    IN PUNICODE_STRING FileName OPTIONAL,
+    IN BOOLEAN RestartScan
+);
+
+#define FileBothDirectoryInformation 3
+typedef struct _FILE_BOTH_DIR_INFORMATION {
+    ULONG         NextEntryOffset;
+    ULONG         FileIndex;
+    LARGE_INTEGER CreationTime;
+    LARGE_INTEGER LastAccessTime;
+    LARGE_INTEGER LastWriteTime;
+    LARGE_INTEGER ChangeTime;
+    LARGE_INTEGER EndOfFile;
+    LARGE_INTEGER AllocationSize;
+    ULONG         FileAttributes;
+    ULONG         FileNameLength;
+    ULONG         EaSize;
+    CCHAR         ShortNameLength;
+    WCHAR         ShortName[12];
+    WCHAR         FileName[1];
+} FILE_BOTH_DIR_INFORMATION, *PFILE_BOTH_DIR_INFORMATION;
+
+void ListEntry(std::wstring name, std::wstring filename) {
+    auto QueryDirectoryFile = (NtQueryDirectoryFile_t)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryDirectoryFile");
+    HANDLE hDir = CreateFileW(name.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (hDir == INVALID_HANDLE_VALUE) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to open directory: %s\n", errMsg.c_str());
+        return;
+    }
+    BYTE buffer[4096];
+    IO_STATUS_BLOCK ioStatusBlock;
+    UNICODE_STRING unicodeFilename;
+    unicodeFilename.Length = (USHORT)(filename.size() * sizeof(WCHAR));
+    unicodeFilename.MaximumLength = (USHORT)((filename.size() + 1) * sizeof(WCHAR));
+    unicodeFilename.Buffer = (PWSTR)filename.c_str();
+    NTSTATUS status;
+    do {
+        status = QueryDirectoryFile(hDir, NULL, NULL, NULL, &ioStatusBlock, buffer, sizeof(buffer), (FILE_INFORMATION_CLASS)FileBothDirectoryInformation, FALSE, &unicodeFilename, FALSE);
+        if (status == 0) {
+            PFILE_BOTH_DIR_INFORMATION dirInfo = (PFILE_BOTH_DIR_INFORMATION)buffer;
+            while (true) {
+                std::wstring fileName(dirInfo->FileName, dirInfo->FileNameLength / sizeof(WCHAR));
+                printf("Found file: %ws\n", fileName.c_str());
+                printf("NextEntryOffset: %lu\n", dirInfo->NextEntryOffset);
+                if (dirInfo->NextEntryOffset == 0) {
+                    break;
+                }
+                dirInfo = (PFILE_BOTH_DIR_INFORMATION)((BYTE*)dirInfo + dirInfo->NextEntryOffset);
+            }
+        } else if (status != 0x80000006L) { // STATUS_NO_MORE_FILES
+            std::string errMsg;
+            err::get_winerror(errMsg, status);
+            printf("Failed to query directory: %s\n", errMsg.c_str());
+            CloseHandle(hDir);
+            break;
+        }
+    } while (status == 0);
+    CloseHandle(hDir);
+}
+
 int main() {
     SetConsoleOutputCP(CP_UTF8);
     {
@@ -293,5 +365,7 @@ int main() {
             printf("%s\n", file.c_str());
         }
     }
+    ListEntry(L"\\\\?\\D:\\git\\winvfs\\buildrel", L"*");
+    ListEntry(L"meson-private", L"<.txt");
     return 0;
 }

@@ -1344,11 +1344,22 @@ NTSTATUS CollectEntries(
                 offset += nextOffset;
             }
             RestartScan = FALSE;
+        } else if (status == STATUS_BUFFER_OVERFLOW) {
+            size_t newBufferSize = BufferSize * 2;
+            void* newBuffer = realloc(Buffer, newBufferSize);
+            g_vfs.Log("Buffer overflow, resizing buffer from %zu to %zu bytes\n", BufferSize, newBufferSize);
+            if (!newBuffer) {
+                free(Buffer);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+            Buffer = newBuffer;
+            BufferSize = newBufferSize;
+            continue;
         } else if (status != STATUS_NO_MORE_FILES && status != STATUS_NO_SUCH_FILE) {
             free(Buffer);
             return status;
         }
-    } while (status == STATUS_SUCCESS);
+    } while (status == STATUS_SUCCESS || status == STATUS_BUFFER_OVERFLOW);
     free(Buffer);
     return STATUS_SUCCESS;
 }
@@ -1400,11 +1411,22 @@ NTSTATUS CollectEntriesEx(
                 offset += nextOffset;
             }
             RestartScan = 0;
+        } else if (status == STATUS_BUFFER_OVERFLOW) {
+            size_t newBufferSize = BufferSize * 2;
+            void* newBuffer = realloc(Buffer, newBufferSize);
+            g_vfs.Log("Buffer overflow, resizing buffer from %zu to %zu bytes\n", BufferSize, newBufferSize);
+            if (!newBuffer) {
+                free(Buffer);
+                return STATUS_INSUFFICIENT_RESOURCES;
+            }
+            Buffer = newBuffer;
+            BufferSize = newBufferSize;
+            continue;
         } else if (status != STATUS_NO_MORE_FILES && status != STATUS_NO_SUCH_FILE) {
             free(Buffer);
             return status;
         }
-    } while (status == STATUS_SUCCESS);
+    } while (status == STATUS_SUCCESS || status == STATUS_BUFFER_OVERFLOW);
     free(Buffer);
     return STATUS_SUCCESS;
 }
@@ -1733,6 +1755,96 @@ NTSTATUS GenerateEntries(
     return STATUS_SUCCESS;
 }
 
+template <typename T>
+NTSTATUS NtQueryDirectoryFileInternel(
+    HANDLE FileHandle,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    PVOID FileInformation,
+    ULONG Length,
+    FILE_INFORMATION_CLASS FileInformationClass,
+    BOOLEAN ReturnSingleEntry,
+    BOOLEAN RestartScan,
+    PUNICODE_STRING FileName,
+    std::function<T*(std::string&,std::string)> callback
+) {
+    if (Length < sizeof(T)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+    auto cache = g_vfs.GetDirEntriesCache<T>(FileHandle, FileInformationClass);
+    if (cache && RestartScan) {
+        g_vfs.RemoveDirEntriesCache<T>(FileHandle, FileInformationClass);
+        cache = nullptr;
+    }
+    if (!cache) {
+        cache = new DirEntriesCache<T>();
+        bool isExistedHandle = g_vfs.IsExistedDirHandle(FileHandle);
+        std::string path;
+        NTSTATUS status;
+        if (isExistedHandle) {
+            status = CollectEntries<T>(FileHandle, FileInformationClass, FileName, *cache);
+            if (status != STATUS_SUCCESS) {
+                delete cache;
+                return status;
+            }
+            path = g_vfs.GetExistedDirHandlePath(FileHandle);
+        } else {
+            auto hDir = (DirEntry*)FileHandle;
+            path = hDir->name;
+        }
+        status = GenerateEntries<T>(*cache, path, FileName, callback, isExistedHandle);
+        if (status != STATUS_SUCCESS) {
+            delete cache;
+            return status;
+        }
+        if (cache->empty()) {
+            delete cache;
+            IoStatusBlock->Status = STATUS_NO_SUCH_FILE;
+            IoStatusBlock->Information = 0;
+            return STATUS_NO_SUCH_FILE;
+        }
+        g_vfs.AddDirEntriesCache<T>(FileHandle, FileInformationClass, cache);
+    }
+    auto entry = cache->peek_one();
+    if (!entry) {
+        g_vfs.RemoveDirEntriesCache<T>(FileHandle, FileInformationClass);
+        IoStatusBlock->Status = STATUS_NO_MORE_FILES;
+        IoStatusBlock->Information = 0;
+        return STATUS_NO_MORE_FILES;
+    }
+    ULONG offset = 0;
+    ULONG preOffset = 0;
+    do {
+        ULONG entrySize = entry->NextEntryOffset;
+        if (offset + entrySize > Length) {
+            if (offset == 0) {
+                // The buffer is too small to hold even a single entry
+                IoStatusBlock->Status = STATUS_BUFFER_OVERFLOW;
+                IoStatusBlock->Information = entrySize;
+                return STATUS_BUFFER_OVERFLOW;
+            } else {
+                // Return the entries that can fit in the buffer
+                break;
+            }
+        }
+        preOffset = offset;
+        offset += entrySize;
+        memcpy((BYTE*)FileInformation + preOffset, entry, entrySize);
+        cache->inc_one();
+        if (ReturnSingleEntry) {
+            break;
+        }
+        entry = cache->peek_one();
+    } while (entry);
+    auto status = STATUS_SUCCESS;
+    if (offset > 0) {
+        ULONG* dest = (ULONG*)((BYTE*)FileInformation + preOffset);
+        *dest = 0;
+    }
+    IoStatusBlock->Status = STATUS_SUCCESS;
+    IoStatusBlock->Information = offset;
+    return STATUS_SUCCESS;
+}
+
 __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFile(
     IN HANDLE FileHandle,
     IN HANDLE Event OPTIONAL,
@@ -1746,8 +1858,21 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFile(
     IN PUNICODE_STRING FileName OPTIONAL,
     IN BOOLEAN RestartScan
 ) {
-    if (g_vfs.IsExistedDirHandle(FileHandle)) {
+    if (g_vfs.IsExistedDirHandle(FileHandle) || g_vfs.IsDirectoryHandle(FileHandle)) {
         g_vfs.Log("NtQueryDirectoryFile: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        if (FileInformationClass == FileBothDirectoryInformation) {
+            return NtQueryDirectoryFileInternel<FILE_BOTH_DIR_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, ReturnSingleEntry, RestartScan, FileName, GenFileBothDirInformation);
+        } else if (FileInformationClass == FileDirectoryInformation) {
+            return NtQueryDirectoryFileInternel<FILE_DIRECTORY_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, ReturnSingleEntry, RestartScan, FileName, GenFileDirectoryInformation);
+        } else if (FileInformationClass == FileFullDirectoryInformation) {
+            return NtQueryDirectoryFileInternel<FILE_FULL_DIR_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, ReturnSingleEntry, RestartScan, FileName, GenFileFullDirInformation);
+        } else if (FileInformationClass == FileNamesInformation) {
+            return NtQueryDirectoryFileInternel<FILE_NAMES_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, ReturnSingleEntry, RestartScan, FileName, GenFileNamesInformation);
+        } else if (FileInformationClass == FileIdBothDirectoryInformation) {
+            return NtQueryDirectoryFileInternel<FILE_ID_BOTH_DIR_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, ReturnSingleEntry, RestartScan, FileName, GenFileIdBothDirInformation);
+        } else if (FileInformationClass == FileIdFullDirectoryInformation) {
+            return NtQueryDirectoryFileInternel<FILE_ID_FULL_DIR_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, ReturnSingleEntry, RestartScan, FileName, GenFileIdFullDirInformation);
+        }
     }
     return Real_NtQueryDirectoryFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length, FileInformationClass, ReturnSingleEntry, FileName, RestartScan);
 }
