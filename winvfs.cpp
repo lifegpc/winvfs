@@ -1819,7 +1819,7 @@ NTSTATUS NtQueryDirectoryFileInternel(
             if (offset == 0) {
                 // The buffer is too small to hold even a single entry
                 IoStatusBlock->Status = STATUS_BUFFER_OVERFLOW;
-                IoStatusBlock->Information = entrySize;
+                IoStatusBlock->Information = 0;
                 return STATUS_BUFFER_OVERFLOW;
             } else {
                 // Return the entries that can fit in the buffer
@@ -1941,7 +1941,7 @@ NTSTATUS NtQueryDirectoryFileExInternel(
             if (offset == 0) {
                 // The buffer is too small to hold even a single entry
                 IoStatusBlock->Status = STATUS_BUFFER_OVERFLOW;
-                IoStatusBlock->Information = entrySize;
+                IoStatusBlock->Information = 0;
                 return STATUS_BUFFER_OVERFLOW;
             } else {
                 // Return the entries that can fit in the buffer
