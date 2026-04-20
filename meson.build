@@ -1,20 +1,37 @@
 project('winvfs', default_options : ['cpp_std=c++17'])
 add_languages('c', 'cpp', required: true)
 
-zlib = subproject('zlib', required: true)
-utils = subproject('utils', required: true)
-detours = subproject('detours', required: true)
-if get_option('zstd')
-    zstd = subproject('zstd', required: true)
-    xp3vfs = subproject('xp3vfs', required: true, default_options : ['zstd=true'])
-else
-    xp3vfs = subproject('xp3vfs', required: true, default_options : ['zstd=false'])
+utils_default_options = []
+WIN32 = host_machine.system() in ['windows', 'cygwin']
+if not WIN32
+    utils_default_options += 'utils_iconv=enabled'
 endif
 
-zlib_dep = zlib.get_variable('zlib_dep')
-utils_dep = utils.get_variable('utils_dep')
-detours_dep = detours.get_variable('detours_dep')
-xp3vfs_dep = xp3vfs.get_variable('xp3vfs_dep')
+if get_option('wrap')
+    zlib = subproject('zlib', required: true)
+    utils = subproject('utils', required: true)
+    detours = subproject('detours', required: true)
+    if get_option('zstd')
+        zstd = subproject('zstd', required: true)
+        xp3vfs = subproject('xp3vfs', required: true, default_options : ['zstd=true'])
+    else
+        xp3vfs = subproject('xp3vfs', required: true, default_options : ['zstd=false'])
+    endif
+
+    zlib_dep = zlib.get_variable('zlib_dep')
+    utils_dep = utils.get_variable('utils_dep')
+    detours_dep = detours.get_variable('detours_dep')
+    xp3vfs_dep = xp3vfs.get_variable('xp3vfs_dep')
+else
+    zlib_dep = dependency('zlib', required: true, version: '>=1.1.2')
+    utils_dep = dependency('utils', required: false)
+    if not utils_dep.found()
+        utils = subproject('utils', required: true, default_options: utils_default_options)
+        utils_dep = utils.get_variable('utils_dep')
+    endif
+    detours_dep = dependency('detours', required: true)
+    xp3vfs_dep = dependency('xp3vfs', required: true)
+endif
 
 deps = [
     zlib_dep,

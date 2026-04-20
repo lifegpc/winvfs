@@ -362,6 +362,18 @@ typedef BOOLEAN(NTAPI* RtlIsNameInExpression_t)(
     IN PWCHAR  UpcaseTable OPTIONAL
 );
 static RtlIsNameInExpression_t Real_RtlIsNameInExpression = nullptr;
+typedef NTSTATUS(NTAPI* NtWriteFile_t)(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    IN PVOID Buffer,
+    IN ULONG Length,
+    IN PLARGE_INTEGER ByteOffset OPTIONAL,
+    IN PULONG Key OPTIONAL
+);
+static NtWriteFile_t Real_NtWriteFile = nullptr;
 
 __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
     OUT PHANDLE FileHandle,
@@ -1998,6 +2010,25 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFileEx(
     return Real_NtQueryDirectoryFileEx(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName);
 }
 
+__kernel_entry NTSTATUS NTAPI Hooked_NtWriteFile(
+    IN HANDLE FileHandle,
+    IN HANDLE Event OPTIONAL,
+    IN PIO_APC_ROUTINE ApcRoutine OPTIONAL,
+    IN PVOID ApcContext OPTIONAL,
+    OUT PIO_STATUS_BLOCK IoStatusBlock,
+    IN PVOID Buffer,
+    IN ULONG Length,
+    IN PLARGE_INTEGER ByteOffset OPTIONAL,
+    IN PULONG Key OPTIONAL
+) {
+    if (g_vfs.GetFile(FileHandle) || g_vfs.IsDirectoryHandle(FileHandle)) {
+        IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
+        IoStatusBlock->Information = 0;
+        return STATUS_UNSUCCESSFUL;
+    }
+    return Real_NtWriteFile(FileHandle, Event, ApcRoutine, ApcContext, IoStatusBlock, Buffer, Length, ByteOffset, Key);
+}
+
 VFS::VFS() {
     WCHAR exePath[MAX_PATH];
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
@@ -2164,6 +2195,10 @@ bool VFS::Init() {
     if (!Real_RtlIsNameInExpression) {
         return false;
     }
+    Real_NtWriteFile = (decltype(Real_NtWriteFile))GetProcAddress(hModule, "NtWriteFile");
+    if (!Real_NtWriteFile) {
+        return false;
+    }
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&Real_NtCreateFile, Hooked_NtCreateFile);
@@ -2182,6 +2217,7 @@ bool VFS::Init() {
     if (Real_NtQueryDirectoryFileEx) {
         DetourAttach(&Real_NtQueryDirectoryFileEx, Hooked_NtQueryDirectoryFileEx);
     }
+    DetourAttach(&Real_NtWriteFile, Hooked_NtWriteFile);
     DetourTransactionCommit();
     inited = true;
     return true;
@@ -2288,6 +2324,7 @@ bool VFS::Uninit() {
     if (Real_NtQueryDirectoryFileEx) {
         DetourDetach(&Real_NtQueryDirectoryFileEx, Hooked_NtQueryDirectoryFileEx);
     }
+    DetourDetach(&Real_NtWriteFile, Hooked_NtWriteFile);
     DetourTransactionCommit();
     inited = false;
     return true;

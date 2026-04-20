@@ -1,2 +1,3 @@
+option('wrap', type : 'boolean', value : false, description : 'Build with wrap support')
 option('zstd', type: 'boolean', value: true, description: 'Enable zstd support in xp3vfs')
 option('build_tests', type: 'feature', value: 'auto', description: 'Build tests')
