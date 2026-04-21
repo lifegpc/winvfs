@@ -562,9 +562,20 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtReadFile(
         GLOG("NtReadFile: %p, Length: %lu, ByteOffset: %lld\n", FileHandle, Length, ByteOffset ? ByteOffset->QuadPart : -1);
         size_t bytesRead;
         if (ByteOffset) {
-            bytesRead = file->read_at((uint8_t*)Buffer, Length, ByteOffset->QuadPart);
+            int64_t offset = ByteOffset->QuadPart;
+            size_t n = file->read_at((uint8_t*)Buffer, Length, offset);
+            bytesRead = n;
+            while (bytesRead < Length && n > 0) {
+                n = file->read_at((uint8_t*)Buffer + bytesRead, Length - bytesRead, offset + bytesRead);
+                bytesRead += n;
+            }
         } else {
-            bytesRead = file->read((uint8_t*)Buffer, Length);
+            size_t n = file->read((uint8_t*)Buffer, Length);
+            bytesRead = n;
+            while (bytesRead < Length && n > 0) {
+                n = file->read((uint8_t*)Buffer + bytesRead, Length - bytesRead);
+                bytesRead += n;
+            }
         }
         GLOG("Bytes read: %zu\n", bytesRead);
         if (bytesRead == 0) {
@@ -574,11 +585,12 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtReadFile(
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = bytesRead;
         }
-        if (Event) {
+        auto cinfo = g_vfs.GetCompletionInfo(FileHandle);
+        auto skipEvent = cinfo && (cinfo->Flags & FILE_SKIP_SET_EVENT_ON_HANDLE);
+        if (Event && !skipEvent) {
             SetEvent(Event);
         }
-        auto cinfo = g_vfs.GetCompletionInfo(FileHandle);
-        if (cinfo) {
+        if (cinfo && !(cinfo->Flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)) {
             Real_NtSetIoCompletion(
                 cinfo->Port,
                 cinfo->Key,
@@ -1204,6 +1216,20 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtSetInformationFile(
             }
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = sizeof(FILE_COMPLETION_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileIoCompletionNotificationInformation) {
+            if (Length < sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            auto notificationInfo = (FILE_IO_COMPLETION_NOTIFICATION_INFORMATION*)FileInformation;
+            auto now = g_vfs.GetCompletionInfo(FileHandle);
+            if (now) {
+                now->Flags = notificationInfo->Flags;
+            } else {
+                return STATUS_UNSUCCESSFUL;
+            }
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION);
             return STATUS_SUCCESS;
         }
     }
