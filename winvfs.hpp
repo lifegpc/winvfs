@@ -103,6 +103,12 @@ public:
     std::string name;
 };
 
+typedef struct _CompleteInfo {
+    HANDLE Port;
+    PVOID  Key;
+    ULONG  Flags;
+} CompleteInfo, *PCompleteInfo;
+
 class VFS {
 public:
     VFS();
@@ -196,6 +202,8 @@ public:
     void AddDirectoryHandle(HANDLE hDir);
     bool IsDirectoryHandle(HANDLE hDir);
     void RemoveDirectoryHandle(HANDLE hDir);
+    PCompleteInfo GetCompletionInfo(HANDLE hFile);
+    void SetCompletionInfo(HANDLE hFile, CompleteInfo info);
 private:
     void AddEntry(std::string path);
     bool inited = false;
@@ -216,6 +224,7 @@ private:
     std::unordered_map<std::pair<HANDLE, FILE_INFORMATION_CLASS>, void*, PairHasher> dir_entries_cache;
     std::unordered_map<std::string, std::vector<std::string>> directoryEntries;
     std::unordered_set<HANDLE> dir_handles;
+    std::unordered_map<HANDLE, CompleteInfo> complete_infos;
 };
 
 VFS& GetGlobalVFS();

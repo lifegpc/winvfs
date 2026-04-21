@@ -134,6 +134,15 @@ typedef struct _FILE_ALL_INFORMATION {
     FILE_ALIGNMENT_INFORMATION AlignmentInformation;
     FILE_NAME_INFORMATION      NameInformation;
 } FILE_ALL_INFORMATION, *PFILE_ALL_INFORMATION;
+#define FileCompletionInformation 30
+typedef struct _FILE_COMPLETION_INFORMATION {
+    HANDLE Port;
+    PVOID  Key;
+} FILE_COMPLETION_INFORMATION, *PFILE_COMPLETION_INFORMATION;
+#define FileIoCompletionNotificationInformation 41
+typedef struct _FILE_IO_COMPLETION_NOTIFICATION_INFORMATION {
+    ULONG Flags;
+} FILE_IO_COMPLETION_NOTIFICATION_INFORMATION, *PFILE_IO_COMPLETION_NOTIFICATION_INFORMATION;
 typedef enum _FSINFOCLASS {
     FileFsVolumeInformation          = 1,
     FileFsLabelInformation,         // 2
@@ -382,6 +391,14 @@ typedef NTSTATUS(NTAPI* NtWriteFile_t)(
     IN PULONG Key OPTIONAL
 );
 static NtWriteFile_t Real_NtWriteFile = nullptr;
+typedef NTSTATUS(NTAPI* NtSetIoCompletion_t)(
+    IN HANDLE IoCompletionHandle,
+    IN PVOID KeyContext,
+    IN PVOID ApcContext OPTIONAL,
+    IN ULONG IoStatus,
+    IN ULONG_PTR NumberOfBytesTransferred
+);
+static NtSetIoCompletion_t Real_NtSetIoCompletion = nullptr;
 
 __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
     OUT PHANDLE FileHandle,
@@ -556,6 +573,19 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtReadFile(
         } else {
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = bytesRead;
+        }
+        if (Event) {
+            SetEvent(Event);
+        }
+        auto cinfo = g_vfs.GetCompletionInfo(FileHandle);
+        if (cinfo) {
+            Real_NtSetIoCompletion(
+                cinfo->Port,
+                cinfo->Key,
+                ApcContext,
+                STATUS_SUCCESS,
+                bytesRead
+            );
         }
         return STATUS_SUCCESS;
     } else if (g_vfs.IsDirectoryHandle(FileHandle)) {
@@ -1159,6 +1189,22 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtSetInformationFile(
             } else {
                 return STATUS_UNSUCCESSFUL;
             }
+        } else if (FileInformationClass == FileCompletionInformation) {
+            if (Length < sizeof(FILE_COMPLETION_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            auto completionInfo = (FILE_COMPLETION_INFORMATION*)FileInformation;
+            auto now = g_vfs.GetCompletionInfo(FileHandle);
+            if (now) {
+                now->Key = completionInfo->Key;
+                now->Port = completionInfo->Port;
+            } else {
+                auto newInfo = CompleteInfo { completionInfo->Port, completionInfo->Key, 0 };
+                g_vfs.SetCompletionInfo(FileHandle, newInfo);
+            }
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_COMPLETION_INFORMATION);
+            return STATUS_SUCCESS;
         }
     }
     return Real_NtSetInformationFile(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
@@ -2215,6 +2261,10 @@ bool VFS::Init() {
     if (!Real_NtWriteFile) {
         return false;
     }
+    Real_NtSetIoCompletion = (decltype(Real_NtSetIoCompletion))GetProcAddress(hModule, "NtSetIoCompletion");
+    if (!Real_NtSetIoCompletion) {
+        return false;
+    }
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&Real_NtCreateFile, Hooked_NtCreateFile);
@@ -2598,4 +2648,16 @@ void VFS::AddArchiveWithErrorMsg(std::wstring path) {
         MessageBoxW(NULL, wmsg.c_str(), L"错误", MB_ICONERROR);
         ExitProcess(1);
     }
+}
+
+PCompleteInfo VFS::GetCompletionInfo(HANDLE hFile) {
+    auto it = complete_infos.find(hFile);
+    if (it != complete_infos.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
+
+void VFS::SetCompletionInfo(HANDLE hFile, CompleteInfo info) {
+    complete_infos[hFile] = info;
 }
