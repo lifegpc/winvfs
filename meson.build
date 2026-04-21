@@ -53,6 +53,10 @@ if get_option('logging').enable_auto_if(not meson.is_subproject()).enabled()
     public_args += '-DWINVFS_LOGGING'
 endif
 
+if get_option('memfile')
+    public_args += '-DWINVFS_MEMFILE'
+endif
+
 winvfs = static_library('winvfs',
     sources : files('winvfs.cpp', 'winvfs.hpp'),
     dependencies : deps,

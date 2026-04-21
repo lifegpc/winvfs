@@ -2,3 +2,4 @@ option('wrap', type : 'boolean', value : false, description : 'Build with wrap s
 option('zstd', type: 'boolean', value: true, description: 'Enable zstd support in xp3vfs (only work in wrap mode)')
 option('build_tests', type: 'feature', value: 'auto', description: 'Build tests')
 option('logging', type: 'feature', value: 'auto', description: 'Enable logging support')
+option('memfile', type: 'boolean', value: false, description: 'Enable in memory file support')

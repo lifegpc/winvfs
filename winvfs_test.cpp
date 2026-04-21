@@ -369,5 +369,49 @@ int main() {
     }
     ListEntry(L"\\\\?\\D:\\git\\winvfs\\buildrel", L"*");
     ListEntry(L"meson-private", L"<.txt");
+#if WINVFS_MEMFILE
+    {
+        auto& vfs = GetGlobalVFS();
+        vfs.AddMemFile("test.txt", "HELLO!");
+        vfs.AddMemFile("meson-private/test2.txt", "HELLO2!");
+    }
+    ListEntry(L".", L"<.txt");
+    ListEntry(L"meson-private", L"<.txt");
+    hFind = FindFirstFileW(L"meson-private\\*", &findData);
+    if (hFind == INVALID_HANDLE_VALUE) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to find first file in meson-private directory: %s\n", errMsg.c_str());
+    } else {
+        do {
+            std::wstring wFilename(findData.cFileName);
+            std::string filename;
+            wchar_util::wstr_to_str(filename, wFilename, CP_UTF8);
+            printf("Found file in meson-private directory: %s, File Size: %llu, is_dir: %s\n", filename.c_str(), ((LONGLONG)findData.nFileSizeHigh << 32) | findData.nFileSizeLow, (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? "true" : "false");
+        } while (FindNextFileW(hFind, &findData));
+        FindClose(hFind);
+    }
+    auto memFileHandle = CreateFileW(L"meson-private/test2.txt", GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (memFileHandle == INVALID_HANDLE_VALUE) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to open memory file: %s\n", errMsg.c_str());
+    } else {
+        printf("Memory file handle: %p\n", memFileHandle);
+        char buffer[128];
+        DWORD bytesRead;
+        auto ok = ReadFile(memFileHandle, buffer, 128, &bytesRead, NULL);
+        if (ok) {
+            printf("Read %lu bytes from memory file:\n", bytesRead);
+            printf("%.*s\n", bytesRead, buffer);
+            printf("\n");
+        } else {
+            std::string errMsg;
+            err::get_winerror(errMsg, GetLastError());
+            printf("Failed to read memory file: %s\n", errMsg.c_str());
+        }
+        CloseHandle(memFileHandle);
+    }
+#endif
     return 0;
 }

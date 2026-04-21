@@ -107,6 +107,7 @@ typedef struct _CompleteInfo {
     HANDLE Port;
     PVOID  Key;
     ULONG  Flags;
+    BOOLEAN Seted;
 } CompleteInfo, *PCompleteInfo;
 
 class VFS {
@@ -143,6 +144,20 @@ public:
      * @param path Path to a xp3 archive.
      */
     void AddArchiveWithErrorMsg(std::wstring path);
+    #if WINVFS_MEMFILE
+    /**
+     * Add a file in memory to vfs.
+     * @param name Virtual path of the file. only UTF-8 encoding is supported. It should not start with '/' or '\\'.
+     * @param content Content of the file in bytes.
+     */
+    void AddMemFile(std::string name, std::vector<uint8_t> content);
+    /**
+     * Add a file in memory to vfs.
+     * @param name Virtual path of the file. only UTF-8 encoding is supported. It should not start with '/' or '\\'.
+     * @param content Content of the file in string.
+     */
+    void AddMemFile(std::string name, std::string content);
+    #endif
     bool Init();
     bool Uninit();
     // Follow function used in Hooked code.
@@ -204,6 +219,16 @@ public:
     void RemoveDirectoryHandle(HANDLE hDir);
     PCompleteInfo GetCompletionInfo(HANDLE hFile);
     void SetCompletionInfo(HANDLE hFile, CompleteInfo info);
+#if WINVFS_MEMFILE
+    bool GetMemEntry(std::string& path, size_t& size);
+    bool GetMemFileEntry(std::string& path, size_t& size);
+    bool GetMemFileInfo(HANDLE hFile, size_t& size, std::string& name);
+    bool IsMemFile(std::string& path);
+    bool IsMemFileHandle(HANDLE hFile);
+    HANDLE OpenMemFile(std::string path);
+    void CloseMemFile(HANDLE hFile);
+    ReadStream* GetMemFile(HANDLE hFile);
+#endif
 private:
     void AddEntry(std::string path);
     bool inited = false;
@@ -223,8 +248,14 @@ private:
     // second is DirEntriesCache<T>* , T is based on FILE_INFORMATION_CLASS
     std::unordered_map<std::pair<HANDLE, FILE_INFORMATION_CLASS>, void*, PairHasher> dir_entries_cache;
     std::unordered_map<std::string, std::vector<std::string>> directoryEntries;
+    std::unordered_set<std::string> addedEntries;
     std::unordered_set<HANDLE> dir_handles;
     std::unordered_map<HANDLE, CompleteInfo> complete_infos;
+#if WINVFS_MEMFILE
+    std::unordered_map<std::string, std::vector<uint8_t>> memfiles;
+    // handle -> (original path, size)
+    std::unordered_map<HANDLE, std::pair<std::string, size_t>> memfile_handle_map;
+#endif
 };
 
 VFS& GetGlobalVFS();
