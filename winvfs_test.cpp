@@ -79,7 +79,9 @@ int main() {
     SetConsoleOutputCP(CP_UTF8);
     {
         auto& g_vfs = GetGlobalVFS();
+#if WINVFS_LOGGING
         g_vfs.logFile = fopen("winvfs.log", "w");
+#endif
         printf("Initializing VFS...\n");
         if (!g_vfs.AddArchive("winvfs.xp3")) {
             printf("Failed to add archive: winvfs.xp3\n");

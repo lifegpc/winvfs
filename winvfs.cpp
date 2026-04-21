@@ -6,6 +6,14 @@
 #include <functional>
 // #include <ntstatus.h>
 
+#if WINVFS_LOGGING
+    #define LOG(...) Log(__VA_ARGS__)
+    #define GLOG(...) g_vfs.Log(__VA_ARGS__)
+#else
+    #define LOG(...) ((void)0)
+    #define GLOG(...) ((void)0)
+#endif
+
 static VFS g_vfs;
 
 VFS& GetGlobalVFS() {
@@ -397,18 +405,18 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
                 std::string basePath = getFinalPath(hDir, FILE_NAME_NORMALIZED);
                 filepath = basePath + "\\" + filepath;
             }
-            g_vfs.Log("NtCreateFile: %s\n", filepath.c_str());
+            GLOG("NtCreateFile: %s\n", filepath.c_str());
             FileEntry entry;
             Xp3Archive* archive;
             std::string directoryName;
             if (g_vfs.GetEntry(filepath, entry, archive)) {
-                g_vfs.Log("File found in VFS: %s\n", filepath.c_str());
+                GLOG("File found in VFS: %s\n", filepath.c_str());
                 auto hFile = g_vfs.OpenFile(entry, archive);
                 if (hFile != INVALID_HANDLE_VALUE) {
                     *FileHandle = hFile;
                     IoStatusBlock->Status = FILE_OPENED;
                     IoStatusBlock->Information = 0;
-                    g_vfs.Log("File opened successfully: %s. %p\n", filepath.c_str(), hFile);
+                    GLOG("File opened successfully: %s. %p\n", filepath.c_str(), hFile);
                     return STATUS_SUCCESS;
                 }
             } else if (g_vfs.IsRootDirectory(filepath)) {
@@ -418,7 +426,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
                 }
                 return status;
             } else if (g_vfs.GetDirectoryName(filepath, directoryName)) {
-                g_vfs.Log("Directory found in VFS: %s\n", filepath.c_str());
+                GLOG("Directory found in VFS: %s\n", filepath.c_str());
                 auto status = Real_NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
                 if (status == STATUS_SUCCESS) {
                     g_vfs.AddExistedDirHandle(*FileHandle, directoryName);
@@ -431,7 +439,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
                 *FileHandle = hDir;
                 IoStatusBlock->Status = FILE_OPENED;
                 IoStatusBlock->Information = 0;
-                g_vfs.Log("Directory opened successfully: %s. %p\n", filepath.c_str(), hDir);
+                GLOG("Directory opened successfully: %s. %p\n", filepath.c_str(), hDir);
                 return STATUS_SUCCESS;
             }
         }
@@ -456,18 +464,18 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtOpenFile(
                 std::string basePath = getFinalPath(hDir, FILE_NAME_NORMALIZED);
                 filepath = basePath + "\\" + filepath;
             }
-            g_vfs.Log("NtOpenFile: %s\n", filepath.c_str());
+            GLOG("NtOpenFile: %s\n", filepath.c_str());
             FileEntry entry;
             Xp3Archive* archive;
             std::string directoryName;
             if (g_vfs.GetEntry(filepath, entry, archive)) {
-                g_vfs.Log("File found in VFS: %s\n", filepath.c_str());
+                GLOG("File found in VFS: %s\n", filepath.c_str());
                 auto hFile = g_vfs.OpenFile(entry, archive);
                 if (hFile != INVALID_HANDLE_VALUE) {
                     *FileHandle = hFile;
                     IoStatusBlock->Status = FILE_OPENED;
                     IoStatusBlock->Information = 0;
-                    g_vfs.Log("File opened successfully: %s. %p\n", filepath.c_str(), hFile);
+                    GLOG("File opened successfully: %s. %p\n", filepath.c_str(), hFile);
                     return STATUS_SUCCESS;
                 }
             } else if (g_vfs.IsRootDirectory(filepath)) {
@@ -477,7 +485,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtOpenFile(
                 }
                 return status;
             } else if (g_vfs.GetDirectoryName(filepath, directoryName)) {
-                g_vfs.Log("Directory found in VFS: %s\n", filepath.c_str());
+                GLOG("Directory found in VFS: %s\n", filepath.c_str());
                 auto status = Real_NtOpenFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, ShareAccess, OpenOptions);
                 if (status == STATUS_SUCCESS) {
                     g_vfs.AddExistedDirHandle(*FileHandle, directoryName);
@@ -490,7 +498,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtOpenFile(
                 *FileHandle = hDir;
                 IoStatusBlock->Status = FILE_OPENED;
                 IoStatusBlock->Information = 0;
-                g_vfs.Log("Directory opened successfully: %s. %p\n", filepath.c_str(), hDir);
+                GLOG("Directory opened successfully: %s. %p\n", filepath.c_str(), hDir);
                 return STATUS_SUCCESS;
             }
         }
@@ -502,20 +510,20 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtClose(
     IN HANDLE Handle
 ) {
     if (g_vfs.ContainsFile(Handle)) {
-        g_vfs.Log("NtClose: %p\n", Handle);
+        GLOG("NtClose: %p\n", Handle);
         g_vfs.CloseFile(Handle);
         return STATUS_SUCCESS;
     }
     if (g_vfs.IsDirectoryHandle(Handle)) {
-        g_vfs.Log("NtClose (directory handle): %p\n", Handle);
+        GLOG("NtClose (directory handle): %p\n", Handle);
         g_vfs.CloseDirectory(Handle);
         return STATUS_SUCCESS;
     }
     if (g_vfs.IsSectionHandle(Handle)) {
-        g_vfs.Log("NtClose (section handle): %p\n", Handle);
+        GLOG("NtClose (section handle): %p\n", Handle);
         g_vfs.RemoveSectionHandle(Handle);
     } else if (g_vfs.IsExistedDirHandle(Handle)) {
-        g_vfs.Log("NtClose (existed dir handle): %p\n", Handle);
+        GLOG("NtClose (existed dir handle): %p\n", Handle);
         g_vfs.RemoveExistedDirHandle(Handle);
     }
     return Real_NtClose(Handle);
@@ -534,14 +542,14 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtReadFile(
 ) {
     auto file = g_vfs.GetFile(FileHandle);
     if (file) {
-        g_vfs.Log("NtReadFile: %p, Length: %lu, ByteOffset: %lld\n", FileHandle, Length, ByteOffset ? ByteOffset->QuadPart : -1);
+        GLOG("NtReadFile: %p, Length: %lu, ByteOffset: %lld\n", FileHandle, Length, ByteOffset ? ByteOffset->QuadPart : -1);
         size_t bytesRead;
         if (ByteOffset) {
             bytesRead = file->read_at((uint8_t*)Buffer, Length, ByteOffset->QuadPart);
         } else {
             bytesRead = file->read((uint8_t*)Buffer, Length);
         }
-        g_vfs.Log("Bytes read: %zu\n", bytesRead);
+        GLOG("Bytes read: %zu\n", bytesRead);
         if (bytesRead == 0) {
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = 0;
@@ -566,7 +574,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryInformationFile(
     FileEntry entry;
     Xp3Archive* archive;
     if (g_vfs.GetFileInfo(FileHandle, entry, archive)) {
-        g_vfs.Log("NtQueryInformationFile: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        GLOG("NtQueryInformationFile: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
         if (FileInformationClass == FileStandardInformation) {
             if (Length < sizeof(FILE_STANDARD_INFORMATION)) {
                 return STATUS_BUFFER_TOO_SMALL;
@@ -739,7 +747,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryInformationFile(
             }
         }
     } else if (g_vfs.IsDirectoryHandle(FileHandle)) {
-        g_vfs.Log("NtQueryInformationFile (directory handle): %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        GLOG("NtQueryInformationFile (directory handle): %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
         if (FileInformationClass == FileNameInformation || FileInformationClass == FileNormalizedNameInformation) {
             if (Length < sizeof(FILE_NAME_INFORMATION)) {
                 return STATUS_BUFFER_TOO_SMALL;
@@ -910,8 +918,9 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryInformationFile(
             }
         }
     }
+#if WINVFS_LOGGING
     if (g_vfs.InTrace(FileHandle)) {
-        g_vfs.Log("NtQueryInformationFile (trace): %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        GLOG("NtQueryInformationFile (trace): %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
         auto result = Real_NtQueryInformationFile(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
         if (result == STATUS_SUCCESS && IoStatusBlock->Status == STATUS_SUCCESS) {
             if (FileInformationClass == FileNameInformation) {
@@ -919,11 +928,12 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryInformationFile(
                 std::wstring wFilename(info->FileName, info->FileNameLength / sizeof(WCHAR));
                 std::string filename;
                 wchar_util::wstr_to_str(filename, wFilename, CP_UTF8);
-                g_vfs.Log("Returned file name: %s\n", filename.c_str());
+                GLOG("Returned file name: %s\n", filename.c_str());
             }
         }
         return result;
     }
+#endif
     return Real_NtQueryInformationFile(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass);
 }
 
@@ -937,7 +947,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryVolumeInformationFile(
     FileEntry entry;
     Xp3Archive* archive;
     if (g_vfs.GetFileInfo(FileHandle, entry, archive) || g_vfs.IsDirectoryHandle(FileHandle)) {
-        g_vfs.Log("NtQueryVolumeInformationFile: %p, FsInformationClass: %d\n", FileHandle, FsInformationClass);
+        GLOG("NtQueryVolumeInformationFile: %p, FsInformationClass: %d\n", FileHandle, FsInformationClass);
         if (FsInformationClass == FileFsVolumeInformation) {
             if (Length < sizeof(FILE_FS_VOLUME_INFORMATION)) {
                 return STATUS_BUFFER_TOO_SMALL;
@@ -976,11 +986,13 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryVolumeInformationFile(
             return STATUS_SUCCESS;
         }
     }
+#if WINVFS_LOGGING
     if (g_vfs.InTrace(FileHandle)) {
-        g_vfs.Log("NtQueryVolumeInformationFile (trace): %p, FsInformationClass: %d\n", FileHandle, FsInformationClass);
+        GLOG("NtQueryVolumeInformationFile (trace): %p, FsInformationClass: %d\n", FileHandle, FsInformationClass);
         auto result = Real_NtQueryVolumeInformationFile(FileHandle, IoStatusBlock, FsInformation, Length, FsInformationClass);
         return result;
     }
+#endif
     return Real_NtQueryVolumeInformationFile(FileHandle, IoStatusBlock, FsInformation, Length, FsInformationClass);
 }
 
@@ -995,10 +1007,10 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryObject(
         FileEntry entry;
         Xp3Archive* archive;
         if (g_vfs.GetFileInfo(Handle, entry, archive)) {
-            g_vfs.Log("NtQueryObject: %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
+            GLOG("NtQueryObject: %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
             if (ObjectInformationClass == ObjectNameInformation) {
                 std::string ntpath = g_vfs.GetNtPath(entry.filename);
-                g_vfs.Log("Object name for handle %p: %s\n", Handle, ntpath.c_str());
+                GLOG("Object name for handle %p: %s\n", Handle, ntpath.c_str());
                 std::wstring wPath;
                 if (!wchar_util::str_to_wstr(wPath, ntpath, CP_UTF8)) {
                     return STATUS_UNSUCCESSFUL;
@@ -1022,7 +1034,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryObject(
                 }
             }
         } else if (g_vfs.IsDirectoryHandle(Handle)) {
-            g_vfs.Log("NtQueryObject (directory handle): %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
+            GLOG("NtQueryObject (directory handle): %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
             if (ObjectInformationClass == ObjectNameInformation) {
                 auto hDir = (DirEntry*)Handle;
                 std::string path = hDir->name.substr(1); // Remove leading slash
@@ -1054,9 +1066,11 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryObject(
             }
         }
     }
+#if WINVFS_LOGGING
     if (g_vfs.InTrace(Handle)) {
-        g_vfs.Log("NtQueryObject (trace): %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
+        GLOG("NtQueryObject (trace): %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
     }
+#endif
     return Real_NtQueryObject(Handle, ObjectInformationClass, ObjectInformation, ObjectInformationLength, ReturnLength);
 }
 
@@ -1073,11 +1087,11 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryAttributesFile(
                 std::string basePath = getFinalPath(hDir, FILE_NAME_NORMALIZED);
                 filepath = basePath + "\\" + filepath;
             }
-            g_vfs.Log("NtQueryAttributesFile: %s\n", filepath.c_str());
+            GLOG("NtQueryAttributesFile: %s\n", filepath.c_str());
             FileEntry entry;
             Xp3Archive* archive;
             if (g_vfs.GetEntry(filepath, entry, archive)) {
-                g_vfs.Log("File found in VFS: %s\n", filepath.c_str());
+                GLOG("File found in VFS: %s\n", filepath.c_str());
                 // Set creation, access, write, change time to current time for simplicity
                 FILETIME ft;
                 GetSystemTimeAsFileTime(&ft);
@@ -1092,7 +1106,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryAttributesFile(
                 FileInformation->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
                 return STATUS_SUCCESS;
             } else if (g_vfs.HasDirectory(filepath)) {
-                g_vfs.Log("Directory found in VFS: %s\n", filepath.c_str());
+                GLOG("Directory found in VFS: %s\n", filepath.c_str());
                 auto re = Real_NtQueryAttributesFile(ObjectAttributes, FileInformation);
                 if (re == STATUS_SUCCESS) {
                     return re;
@@ -1126,7 +1140,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtSetInformationFile(
     FileEntry entry;
     Xp3Archive* archive;
     if (g_vfs.GetFileInfo(FileHandle, entry, archive)) {
-        g_vfs.Log("NtSetInformationFile: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        GLOG("NtSetInformationFile: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
         if (FileInformationClass == FilePositionInformation) {
             if (Length < sizeof(FILE_POSITION_INFORMATION)) {
                 return STATUS_BUFFER_TOO_SMALL;
@@ -1163,7 +1177,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateSection(
         FileEntry entry;
         Xp3Archive* archive;
         if (g_vfs.GetFileInfo(FileHandle, entry, archive)) {
-            g_vfs.Log("NtCreateSection: %p\n", FileHandle);
+            GLOG("NtCreateSection: %p\n", FileHandle);
             if (!(AllocationAttributes & SEC_IMAGE)) {
                 auto file = g_vfs.GetFile(FileHandle);
                 if (!file) {
@@ -1186,14 +1200,14 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateSection(
                 HANDLE hNewSection = NULL;
                 NTSTATUS status = Real_NtCreateSection(&hNewSection, SECTION_ALL_ACCESS, ObjectAttributes, &sectionSize, PAGE_READWRITE, SEC_COMMIT, NULL);
                 if (status != STATUS_SUCCESS) {
-                    g_vfs.Log("Failed to create section: %08X\n", status);
+                    GLOG("Failed to create section: %08X\n", status);
                     return status;
                 }
                 PVOID pBase = NULL;
                 SIZE_T viewSize = 0;
                 status = Real_NtMapViewOfSection(hNewSection, (HANDLE)-1, &pBase, 0, 0, NULL, &viewSize, ViewShare, 0, PAGE_READWRITE);
                 if (status != STATUS_SUCCESS) {
-                    g_vfs.Log("Failed to map view of section: %08X\n", status);
+                    GLOG("Failed to map view of section: %08X\n", status);
                     Real_NtClose(hNewSection);
                     return status;
                 }
@@ -1205,10 +1219,10 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateSection(
                     Real_NtClose(hNewSection);
                     return STATUS_UNSUCCESSFUL;
                 }
-                g_vfs.Log("File content mapped to section successfully: %p, viewSize: %zu, fileSize: %llu, sectionSize: %lld, MaximumSize: %lld\n", pBase, viewSize, entry.original_size, sectionSize.QuadPart, MaximumSize ? MaximumSize->QuadPart : -1);
+                GLOG("File content mapped to section successfully: %p, viewSize: %zu, fileSize: %llu, sectionSize: %lld, MaximumSize: %lld\n", pBase, viewSize, entry.original_size, sectionSize.QuadPart, MaximumSize ? MaximumSize->QuadPart : -1);
                 status = Real_NtUnmapViewOfSection((HANDLE)-1, pBase);
                 if (status != STATUS_SUCCESS) {
-                    g_vfs.Log("Failed to unmap view of section: %08X\n", status);
+                    GLOG("Failed to unmap view of section: %08X\n", status);
                     Real_NtClose(hNewSection);
                     return status;
                 }
@@ -1218,7 +1232,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateSection(
                 if (NT_SUCCESS(status)) {
                     *SectionHandle = hUserSection;
                 } else {
-                    g_vfs.Log("Failed to duplicate section handle: %08X\n", status);
+                    GLOG("Failed to duplicate section handle: %08X\n", status);
                     Real_NtClose(hNewSection);
                 }
                 g_vfs.AddSectionHandle(hUserSection, std::pair(entry, archive));
@@ -1242,15 +1256,15 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtMapViewOfSection(
     IN ULONG Win32Protect
 ) {
     if (g_vfs.IsSectionHandle(SectionHandle)) {
-        g_vfs.Log("NtMapViewOfSection: %p\n", SectionHandle);
+        GLOG("NtMapViewOfSection: %p\n", SectionHandle);
         auto result = Real_NtMapViewOfSection(SectionHandle, ProcessHandle, BaseAddress, ZeroBits, CommitSize, SectionOffset, ViewSize, InheritDisposition, AllocationType, Win32Protect);
-        g_vfs.Log("Result: %08X, viewSize: %zu, SectionOffset: %lli\n", result, *ViewSize, SectionOffset ? SectionOffset->QuadPart : -1);
+        GLOG("Result: %08X, viewSize: %zu, SectionOffset: %lli\n", result, *ViewSize, SectionOffset ? SectionOffset->QuadPart : -1);
         if (!result) {
             FileEntry entry;
             Xp3Archive* archive;
             if (g_vfs.GetSectionInfo(SectionHandle, entry, archive)) {
                 *ViewSize = min(*ViewSize, (SIZE_T)(entry.original_size - (SectionOffset ? SectionOffset->QuadPart : 0)));
-                g_vfs.Log("Adjusted view size: %zu\n", *ViewSize);
+                GLOG("Adjusted view size: %zu\n", *ViewSize);
             }
         }
         return result;
@@ -1271,11 +1285,11 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryFullAttributesFile(
                 std::string basePath = getFinalPath(hDir, FILE_NAME_NORMALIZED);
                 filepath = basePath + "\\" + filepath;
             }
-            g_vfs.Log("NtQueryFullAttributesFile: %s\n", filepath.c_str());
+            GLOG("NtQueryFullAttributesFile: %s\n", filepath.c_str());
             FileEntry entry;
             Xp3Archive* archive;
             if (g_vfs.GetEntry(filepath, entry, archive)) {
-                g_vfs.Log("File found in VFS: %s\n", filepath.c_str());
+                GLOG("File found in VFS: %s\n", filepath.c_str());
                 // Set creation, access, write, change time to current time for simplicity
                 FILETIME ft;
                 GetSystemTimeAsFileTime(&ft);
@@ -1292,7 +1306,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryFullAttributesFile(
                 FileInformation->EndOfFile.QuadPart = entry.original_size;
                 return STATUS_SUCCESS;
             } else if (g_vfs.HasDirectory(filepath)) {
-                g_vfs.Log("Directory found in VFS: %s\n", filepath.c_str());
+                GLOG("Directory found in VFS: %s\n", filepath.c_str());
                 auto re = Real_NtQueryFullAttributesFile(ObjectAttributes, FileInformation);
                 if (re == STATUS_SUCCESS) {
                     return re;
@@ -1359,7 +1373,7 @@ NTSTATUS CollectEntries(
         } else if (status == STATUS_BUFFER_OVERFLOW) {
             size_t newBufferSize = BufferSize * 2;
             void* newBuffer = realloc(Buffer, newBufferSize);
-            g_vfs.Log("Buffer overflow, resizing buffer from %zu to %zu bytes\n", BufferSize, newBufferSize);
+            GLOG("Buffer overflow, resizing buffer from %zu to %zu bytes\n", BufferSize, newBufferSize);
             if (!newBuffer) {
                 free(Buffer);
                 return STATUS_INSUFFICIENT_RESOURCES;
@@ -1426,7 +1440,7 @@ NTSTATUS CollectEntriesEx(
         } else if (status == STATUS_BUFFER_OVERFLOW) {
             size_t newBufferSize = BufferSize * 2;
             void* newBuffer = realloc(Buffer, newBufferSize);
-            g_vfs.Log("Buffer overflow, resizing buffer from %zu to %zu bytes\n", BufferSize, newBufferSize);
+            GLOG("Buffer overflow, resizing buffer from %zu to %zu bytes\n", BufferSize, newBufferSize);
             if (!newBuffer) {
                 free(Buffer);
                 return STATUS_INSUFFICIENT_RESOURCES;
@@ -1871,7 +1885,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFile(
     IN BOOLEAN RestartScan
 ) {
     if (g_vfs.IsExistedDirHandle(FileHandle) || g_vfs.IsDirectoryHandle(FileHandle)) {
-        g_vfs.Log("NtQueryDirectoryFile: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        GLOG("NtQueryDirectoryFile: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
         if (FileInformationClass == FileBothDirectoryInformation) {
             return NtQueryDirectoryFileInternel<FILE_BOTH_DIR_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, ReturnSingleEntry, RestartScan, FileName, GenFileBothDirInformation);
         } else if (FileInformationClass == FileDirectoryInformation) {
@@ -1992,7 +2006,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryDirectoryFileEx(
     IN PUNICODE_STRING FileName OPTIONAL
 ) {
     if (g_vfs.IsExistedDirHandle(FileHandle) || g_vfs.IsDirectoryHandle(FileHandle)) {
-        g_vfs.Log("NtQueryDirectoryFileEx: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        GLOG("NtQueryDirectoryFileEx: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
         if (FileInformationClass == FileBothDirectoryInformation) {
             return NtQueryDirectoryFileExInternel<FILE_BOTH_DIR_INFORMATION>(FileHandle, IoStatusBlock, FileInformation, Length, FileInformationClass, QueryFlags, FileName, GenFileBothDirInformation);
         } else if (FileInformationClass == FileDirectoryInformation) {
@@ -2085,24 +2099,26 @@ void CleanupCache(std::pair<HANDLE, FILE_INFORMATION_CLASS> info, void*& cache) 
 
 VFS::~VFS() {
     Uninit();
-    Log("dir_entries_cache size: %zu\n", dir_entries_cache.size());
+    LOG("dir_entries_cache size: %zu\n", dir_entries_cache.size());
     for (auto& [info, cache]: dir_entries_cache) {
         CleanupCache(info, cache);
     }
-    Log("handle_map size: %zu\n", handle_map.size());
+    LOG("handle_map size: %zu\n", handle_map.size());
     for (auto& [handle, _]: handle_map) {
         delete (Xp3File*)handle;
     }
-    Log("dir_handles size: %zu\n", dir_handles.size());
+    LOG("dir_handles size: %zu\n", dir_handles.size());
     for (auto& handle: dir_handles) {
         delete (DirEntry*)handle;
     }
     for (auto archive : archives) {
         delete archive;
     }
+#if WINVFS_LOGGING
     if (logFile) {
         fclose(logFile);
     }
+#endif
 }
 
 bool VFS::AddArchive(const char* path) {
@@ -2269,6 +2285,7 @@ void VFS::CloseFile(HANDLE file) {
     delete (Xp3File*)file;
 }
 
+#if WINVFS_LOGGING
 void VFS::Log(const char* format, ...) {
     if (!logFile) return;
     va_list args;
@@ -2277,6 +2294,7 @@ void VFS::Log(const char* format, ...) {
     va_end(args);
     fflush(logFile);
 }
+#endif
 
 Xp3File* VFS::GetFile(HANDLE file) {
     auto it = handle_map.find(file);
@@ -2334,6 +2352,7 @@ std::string VFS::GetNtPath(std::string& path) {
     return nt_path + str_util::str_replace(path, "/", "\\");
 }
 
+#if WINVFS_LOGGING
 void VFS::AddTrace(HANDLE hFile) {
     trace_handles.insert(hFile);
 }
@@ -2341,6 +2360,7 @@ void VFS::AddTrace(HANDLE hFile) {
 bool VFS::InTrace(HANDLE hFile) {
     return trace_handles.find(hFile) != trace_handles.end();
 }
+#endif
 
 void VFS::AddSectionHandle(HANDLE hSection, std::pair<FileEntry, Xp3Archive*> fileInfo) {
     section_handles[hSection] = fileInfo;
@@ -2393,7 +2413,7 @@ void VFS::RemoveExistedDirHandle(HANDLE hDir) {
     auto it = dir_entries_cache.begin();
     while (it != dir_entries_cache.end()) {
         if (it->first.first == hDir) {
-            Log("Removing cache for handle: %p, type: %d\n", hDir, it->first.second);
+            LOG("Removing cache for handle: %p, type: %d\n", hDir, it->first.second);
             CleanupCache(it->first, it->second);
             it = dir_entries_cache.erase(it);
         } else {
@@ -2524,7 +2544,7 @@ void VFS::RemoveDirectoryHandle(HANDLE hDir) {
     auto it = dir_entries_cache.begin();
     while (it != dir_entries_cache.end()) {
         if (it->first.first == hDir) {
-            Log("Removing cache for handle: %p, type: %d\n", hDir, it->first.second);
+            LOG("Removing cache for handle: %p, type: %d\n", hDir, it->first.second);
             CleanupCache(it->first, it->second);
             it = dir_entries_cache.erase(it);
         } else {

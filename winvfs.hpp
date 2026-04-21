@@ -115,14 +115,20 @@ public:
     HANDLE OpenFile(FileEntry entry, Xp3Archive* archive);
     bool ContainsFile(HANDLE file);
     void CloseFile(HANDLE file);
+#if WINVFS_LOGGING
     void Log(const char* format, ...);
+#endif
     Xp3File* GetFile(HANDLE file);
     bool GetFileInfo(HANDLE file, FileEntry& entry, Xp3Archive*& archive);
+#if WINVFS_LOGGING
     FILE* logFile = nullptr;
+#endif
     std::string GetRootPath(std::string& path);
     std::string GetNtPath(std::string& path);
+#if WINVFS_LOGGING
     void AddTrace(HANDLE hFile);
     bool InTrace(HANDLE hFile);
+#endif
     void AddSectionHandle(HANDLE hSection, std::pair<FileEntry, Xp3Archive*> fileInfo);
     bool GetSectionInfo(HANDLE hSection, FileEntry& entry, Xp3Archive*& archive);
     bool IsSectionHandle(HANDLE hSection);
@@ -172,7 +178,9 @@ private:
     std::list<Xp3Archive*> archives;
     std::unordered_map<std::string, std::pair<FileEntry, Xp3Archive*>, CaseInsensitiveHash, CaseInsensitiveEqual> files;
     std::unordered_map<HANDLE, std::pair<FileEntry, Xp3Archive*>> handle_map;
+#if WINVFS_LOGGING
     std::unordered_set<HANDLE> trace_handles;
+#endif
     std::unordered_map<HANDLE, std::pair<FileEntry, Xp3Archive*>> section_handles;
     std::unordered_map<HANDLE, std::string> existed_dir_handles;
     // second is DirEntriesCache<T>* , T is based on FILE_INFORMATION_CLASS

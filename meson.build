@@ -48,15 +48,23 @@ if MSVC
     add_project_arguments('/utf-8', language: 'cpp')
 endif
 
+public_args = []
+if get_option('logging').enable_auto_if(not meson.is_subproject()).enabled()
+    public_args += '-DWINVFS_LOGGING'
+endif
+
 winvfs = static_library('winvfs',
     sources : files('winvfs.cpp', 'winvfs.hpp'),
     dependencies : deps,
+    c_args: public_args,
+    cpp_args: public_args,
 )
 
 winvfs_dep = declare_dependency(
     link_with : winvfs,
     dependencies : deps,
     include_directories : include_directories('.'),
+    compile_args: public_args,
 )
 
 default_test = false
