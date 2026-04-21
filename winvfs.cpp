@@ -2358,6 +2358,10 @@ void VFS::CloseFile(HANDLE file) {
     if (it != handle_map.end()) {
         handle_map.erase(it);
     }
+    auto it2 = complete_infos.find(file);
+    if (it2 != complete_infos.end()) {
+        complete_infos.erase(it2);
+    }
     delete (Xp3File*)file;
 }
 
