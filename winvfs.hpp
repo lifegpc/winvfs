@@ -107,7 +107,36 @@ class VFS {
 public:
     VFS();
     ~VFS();
+    /**
+     * Add a xp3 archive to vfs
+     * @param path Path to a xp3 archive. UTF-8 or ANSI encoding are supported.
+     */
     bool AddArchive(const char* path);
+    /**
+     * Add a xp3 archive to vfs
+     * @param path Path to a xp3 archive. UTF-8 or ANSI encoding are supported.
+     */
+    bool AddArchive(std::string path);
+    /**
+     * Add a xp3 archive to vfs
+     * @param path Path to a xp3 archive.
+     */
+    bool AddArchive(std::wstring path);
+    /**
+     * Add a xp3 archive to vfs. If failed, open a dialog for user and then exit program.
+     * @param path Path to a xp3 archive. UTF-8 or ANSI encoding are supported.
+     */
+    void AddArchiveWithErrorMsg(const char* path);
+    /**
+     * Add a xp3 archive to vfs. If failed, open a dialog for user and then exit program.
+     * @param path Path to a xp3 archive. UTF-8 or ANSI encoding are supported.
+     */
+    void AddArchiveWithErrorMsg(std::string path);
+    /**
+     * Add a xp3 archive to vfs. If failed, open a dialog for user and then exit program.
+     * @param path Path to a xp3 archive.
+     */
+    void AddArchiveWithErrorMsg(std::wstring path);
     bool Init();
     bool Uninit();
     // Follow function used in Hooked code.

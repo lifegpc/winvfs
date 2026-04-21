@@ -2557,3 +2557,45 @@ void VFS::CloseDirectory(HANDLE hDir) {
     RemoveDirectoryHandle(hDir);
     delete (DirEntry*)hDir;
 }
+
+bool VFS::AddArchive(std::string path) {
+    return AddArchive(path.c_str());
+}
+
+bool VFS::AddArchive(std::wstring path) {
+    std::string p;
+    if (!wchar_util::wstr_to_str(p, path, CP_UTF8)) {
+        return false;
+    }
+    return AddArchive(p.c_str());
+}
+
+void VFS::AddArchiveWithErrorMsg(const char* path) {
+    if (!AddArchive(path)) {
+        std::wstring wpath;
+        if (!wchar_util::str_to_wstr(wpath, path, CP_UTF8)) {
+            MessageBoxW(NULL, L"无法打开资源文件。请检查资源文件是否完整", L"错误", MB_ICONERROR);
+            ExitProcess(1);
+            return;
+        }
+        std::wstring wmsg = L"无法打开 " + wpath + L"。请检查文件是否存在";
+        MessageBoxW(NULL, wmsg.c_str(), L"错误", MB_ICONERROR);
+        ExitProcess(1);
+        return;
+    }
+}
+
+void VFS::AddArchiveWithErrorMsg(std::string path) {
+    AddArchiveWithErrorMsg(path.c_str());
+}
+
+void VFS::AddArchiveWithErrorMsg(std::wstring path) {
+    std::string p;
+    if (wchar_util::wstr_to_str(p, path, CP_UTF8)) {
+        AddArchiveWithErrorMsg(p.c_str());
+    } else {
+        std::wstring wmsg = L"无法转换编码，文件" + path + L"无法打开";
+        MessageBoxW(NULL, wmsg.c_str(), L"错误", MB_ICONERROR);
+        ExitProcess(1);
+    }
+}
