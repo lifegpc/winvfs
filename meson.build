@@ -17,6 +17,11 @@ if get_option('wrap')
     else
         xp3vfs = subproject('xp3vfs', required: true, default_options : ['zstd=false'])
     endif
+    if get_option('asar')
+        nlohmann_json = subproject('nlohmann_json', required: true)
+        asar = subproject('asar', required: true)
+        asar_dep = asar.get_variable('asar_dep')
+    endif
 
     zlib_dep = zlib.get_variable('zlib_dep')
     utils_dep = utils.get_variable('utils_dep')
@@ -31,6 +36,9 @@ else
     endif
     detours_dep = dependency('detours', required: true)
     xp3vfs_dep = dependency('xp3vfs', required: true)
+    if get_option('asar')
+        asar_dep = dependency('asar', required: true)
+    endif
 endif
 
 deps = [
@@ -39,6 +47,10 @@ deps = [
     xp3vfs_dep,
     detours_dep,
 ]
+
+if get_option('asar')
+    deps += asar_dep
+endif
 
 cc = meson.get_compiler('c')
 
@@ -55,6 +67,10 @@ endif
 
 if get_option('memfile')
     public_args += '-DWINVFS_MEMFILE'
+endif
+
+if get_option('asar')
+    public_args += '-DWINVFS_ASAR'
 endif
 
 winvfs = static_library('winvfs',

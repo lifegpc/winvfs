@@ -5,6 +5,9 @@
 #include <unordered_set>
 #include <vector>
 #include "xp3.h"
+#if WINVFS_ASAR
+#include "asar.h"
+#endif
 #include "str_util.h"
 #include <Windows.h>
 #include <stdio.h>
@@ -144,7 +147,7 @@ public:
      * @param path Path to a xp3 archive.
      */
     void AddArchiveWithErrorMsg(std::wstring path);
-    #if WINVFS_MEMFILE
+#if WINVFS_MEMFILE
     /**
      * Add a file in memory to vfs.
      * @param name Virtual path of the file. only UTF-8 encoding is supported. It should not start with '/' or '\\'.
@@ -157,7 +160,39 @@ public:
      * @param content Content of the file in string.
      */
     void AddMemFile(std::string name, std::string content);
-    #endif
+#endif
+#if WINVFS_ASAR
+    /**
+     * Add a asar archive to vfs
+     * @param path Path to a asar archive. UTF-8 or ANSI encoding are supported.
+     */
+    bool AddAsarArchive(const char* path);
+    /**
+     * Add a asar archive to vfs
+     * @param path Path to a asar archive. UTF-8 or ANSI encoding are supported.
+     */
+    bool AddAsarArchive(std::string path);
+    /**
+     * Add a asar archive to vfs
+     * @param path Path to a asar archive.
+     */
+    bool AddAsarArchive(std::wstring path);
+    /**
+     * Add a asar archive to vfs. If failed, open a dialog for user and then exit program.
+     * @param path Path to a asar archive. UTF-8 or ANSI encoding are supported.
+     */
+    void AddAsarArchiveWithErrorMsg(const char* path);
+    /**
+     * Add a asar archive to vfs. If failed, open a dialog for user and then exit program.
+     * @param path Path to a asar archive. UTF-8 or ANSI encoding are supported.
+     */
+    void AddAsarArchiveWithErrorMsg(std::string path);
+    /**
+     * Add a asar archive to vfs. If failed, open a dialog for user and then exit program.
+     * @param path Path to a asar archive.
+     */
+    void AddAsarArchiveWithErrorMsg(std::wstring path);
+#endif
     bool Init();
     bool Uninit();
     // Follow function used in Hooked code.
@@ -229,6 +264,16 @@ public:
     void CloseMemFile(HANDLE hFile);
     ReadStream* GetMemFile(HANDLE hFile);
 #endif
+#if WINVFS_ASAR
+    bool GetAsarEntry(std::string& path, asar::FileEntry& entry, asar::Archive*& archive);
+    bool GetAsarFileEntry(std::string& path, asar::FileEntry& entry);
+    bool GetAsarFileInfo(HANDLE hFile, asar::FileEntry& entry);
+    bool IsAsarFile(std::string& path);
+    bool IsAsarFileHandle(HANDLE hFile);
+    HANDLE OpenAsarFile(std::string path);
+    void CloseAsarFile(HANDLE hFile);
+    asar::File* GetAsarFile(HANDLE hFile);
+#endif
 private:
     void AddEntry(std::string path);
     bool inited = false;
@@ -247,14 +292,19 @@ private:
     std::unordered_map<HANDLE, std::string> existed_dir_handles;
     // second is DirEntriesCache<T>* , T is based on FILE_INFORMATION_CLASS
     std::unordered_map<std::pair<HANDLE, FILE_INFORMATION_CLASS>, void*, PairHasher> dir_entries_cache;
-    std::unordered_map<std::string, std::vector<std::string>> directoryEntries;
-    std::unordered_set<std::string> addedEntries;
+    std::unordered_map<std::string, std::vector<std::string>, CaseInsensitiveHash, CaseInsensitiveEqual> directoryEntries;
+    std::unordered_set<std::string, CaseInsensitiveHash, CaseInsensitiveEqual> addedEntries;
     std::unordered_set<HANDLE> dir_handles;
     std::unordered_map<HANDLE, CompleteInfo> complete_infos;
 #if WINVFS_MEMFILE
-    std::unordered_map<std::string, std::vector<uint8_t>> memfiles;
+    std::unordered_map<std::string, std::vector<uint8_t>, CaseInsensitiveHash, CaseInsensitiveEqual> memfiles;
     // handle -> (original path, size)
     std::unordered_map<HANDLE, std::pair<std::string, size_t>> memfile_handle_map;
+#endif
+#if WINVFS_ASAR
+    std::list<asar::Archive*> asar_archives;
+    std::unordered_map<std::string, std::pair<asar::FileEntry, asar::Archive*>, CaseInsensitiveHash, CaseInsensitiveEqual> asar_files;
+    std::unordered_map<HANDLE, std::pair<asar::FileEntry, asar::Archive*>> asar_handle_map;
 #endif
 };
 

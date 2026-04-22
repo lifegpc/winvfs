@@ -3,3 +3,4 @@ option('zstd', type: 'boolean', value: true, description: 'Enable zstd support i
 option('build_tests', type: 'feature', value: 'auto', description: 'Build tests')
 option('logging', type: 'feature', value: 'auto', description: 'Enable logging support')
 option('memfile', type: 'boolean', value: false, description: 'Enable in memory file support')
+option('asar', type: 'boolean', value: false, description: 'Enable asar file support')

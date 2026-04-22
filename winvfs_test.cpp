@@ -87,6 +87,12 @@ int main() {
             printf("Failed to add archive: winvfs.xp3\n");
             return 1;
         }
+#if WINVFS_ASAR
+        if (!g_vfs.AddAsarArchive("winvfs.asar")) {
+            printf("Failed to add ASAR archive: winvfs.asar\n");
+            return 1;
+        }
+#endif
         if (!g_vfs.Init()) {
             printf("Failed to initialize VFS\n");
             return 1;
@@ -369,6 +375,16 @@ int main() {
     }
     ListEntry(L"\\\\?\\D:\\git\\winvfs\\buildrel", L"*");
     ListEntry(L"meson-private", L"<.txt");
+    printf("Testing CASE-INSENSITIVE\n");
+    ListEntry(L"MESON-PRIVATE", L"*");
+    auto attrs = GetFileAttributesW(L"meson-PRIVATE\\TEST.txt");
+    if (attrs == INVALID_FILE_ATTRIBUTES) {
+        std::string errMsg;
+        err::get_winerror(errMsg, GetLastError());
+        printf("Failed to get file attributes with different case: %s\n", errMsg.c_str());
+    } else {
+        printf("File attributes with different case: 0x%08X\n", attrs);
+    }
 #if WINVFS_MEMFILE
     {
         auto& vfs = GetGlobalVFS();

@@ -519,6 +519,20 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtCreateFile(
                 } else {
                     return STATUS_UNSUCCESSFUL;
                 }
+#if WINVFS_ASAR
+            } else if (g_vfs.IsAsarFile(filepath)) {
+                GLOG("ASAR file found in VFS: %s\n", filepath.c_str());
+                auto hFile = g_vfs.OpenAsarFile(filepath);
+                if (hFile != INVALID_HANDLE_VALUE) {
+                    *FileHandle = hFile;
+                    IoStatusBlock->Status = FILE_OPENED;
+                    IoStatusBlock->Information = 0;
+                    GLOG("ASAR file opened successfully: %s. %p\n", filepath.c_str(), hFile);
+                    return STATUS_SUCCESS;
+                } else {
+                    return STATUS_UNSUCCESSFUL;
+                }
+#endif
             } else if (g_vfs.IsRootDirectory(filepath)) {
                 auto status = Real_NtCreateFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, AllocationSize, FileAttributes, ShareAccess, CreateDisposition, CreateOptions, EaBuffer, EaLength);
                 if (status == STATUS_SUCCESS) {
@@ -595,6 +609,20 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtOpenFile(
                 } else {
                     return STATUS_UNSUCCESSFUL;
                 }
+#if WINVFS_ASAR
+            } else if (g_vfs.IsAsarFile(filepath)) {
+                GLOG("ASAR file found in VFS: %s\n", filepath.c_str());
+                auto hFile = g_vfs.OpenAsarFile(filepath);
+                if (hFile != INVALID_HANDLE_VALUE) {
+                    *FileHandle = hFile;
+                    IoStatusBlock->Status = FILE_OPENED;
+                    IoStatusBlock->Information = 0;
+                    GLOG("ASAR file opened successfully: %s. %p\n", filepath.c_str(), hFile);
+                    return STATUS_SUCCESS;
+                } else {
+                    return STATUS_UNSUCCESSFUL;
+                }
+#endif
             } else if (g_vfs.IsRootDirectory(filepath)) {
                 auto status = Real_NtOpenFile(FileHandle, DesiredAccess, ObjectAttributes, IoStatusBlock, ShareAccess, OpenOptions);
                 if (status == STATUS_SUCCESS) {
@@ -638,6 +666,13 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtClose(
         g_vfs.CloseFile(Handle);
         return STATUS_SUCCESS;
     }
+#if WINVFS_ASAR
+    if (g_vfs.IsAsarFileHandle(Handle)) {
+        GLOG("NtClose (ASAR file handle): %p\n", Handle);
+        g_vfs.CloseAsarFile(Handle);
+        return STATUS_SUCCESS;
+    }
+#endif
     if (g_vfs.IsDirectoryHandle(Handle)) {
         GLOG("NtClose (directory handle): %p\n", Handle);
         g_vfs.CloseDirectory(Handle);
@@ -673,6 +708,11 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtReadFile(
     if (!file) {
         file = g_vfs.GetFile(FileHandle);
     }
+#if WINVFS_ASAR
+    if (!file) {
+        file = g_vfs.GetAsarFile(FileHandle);
+    }
+#endif
     if (file) {
         GLOG("NtReadFile: %p, Length: %lu, ByteOffset: %lld\n", FileHandle, Length, ByteOffset ? ByteOffset->QuadPart : -1);
         size_t bytesRead;
@@ -733,6 +773,9 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryInformationFile(
 #if WINVFS_MEMFILE
     size_t memFileSize;
     std::string memFileName;
+#endif
+#if WINVFS_ASAR
+    asar::FileEntry asarEntry;
 #endif
     if (g_vfs.GetFileInfo(FileHandle, entry, archive)) {
         GLOG("NtQueryInformationFile: %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
@@ -1082,6 +1125,182 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryInformationFile(
             }
         }
 #endif
+#if WINVFS_ASAR
+    } else if (g_vfs.GetAsarFileInfo(FileHandle, asarEntry)) {
+        GLOG("NtQueryInformationFile (ASAR file handle): %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
+        asar::FileEntry& entry = asarEntry;
+        if (FileInformationClass == FileStandardInformation) {
+            if (Length < sizeof(FILE_STANDARD_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_STANDARD_INFORMATION* info = (FILE_STANDARD_INFORMATION*)FileInformation;
+            info->AllocationSize.QuadPart = entry.size;
+            info->EndOfFile.QuadPart = entry.size;
+            info->NumberOfLinks = 1;
+            info->DeletePending = FALSE;
+            info->Directory = FALSE;
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_STANDARD_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileBasicInformation) {
+            if (Length < sizeof(FILE_BASIC_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_BASIC_INFORMATION* info = (FILE_BASIC_INFORMATION*)FileInformation;
+            // Set creation, access, write, change time to current time for simplicity
+            FILETIME ft;
+            GetSystemTimeAsFileTime(&ft);
+            info->CreationTime.LowPart = ft.dwLowDateTime;
+            info->CreationTime.HighPart = ft.dwHighDateTime;
+            info->LastAccessTime.LowPart = ft.dwLowDateTime;
+            info->LastAccessTime.HighPart = ft.dwHighDateTime;
+            info->LastWriteTime.LowPart = ft.dwLowDateTime;
+            info->LastWriteTime.HighPart = ft.dwHighDateTime;
+            info->ChangeTime.LowPart = ft.dwLowDateTime;
+            info->ChangeTime.HighPart = ft.dwHighDateTime;
+            info->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_BASIC_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileInternalInformation) {
+            if (Length < sizeof(FILE_INTERNAL_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_INTERNAL_INFORMATION* info = (FILE_INTERNAL_INFORMATION*)FileInformation;
+            info->IndexNumber.QuadPart = 0; // No real index number for ASAR files
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_INTERNAL_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileEaInformation) {
+            if (Length < sizeof(FILE_EA_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_EA_INFORMATION* info = (FILE_EA_INFORMATION*)FileInformation;
+            info->EaSize = 0; // No extended attributes
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_EA_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileAccessInformation) {
+            if (Length < sizeof(FILE_ACCESS_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_ACCESS_INFORMATION* info = (FILE_ACCESS_INFORMATION*)FileInformation;
+            info->AccessFlags = READ_CONTROL;
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_ACCESS_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileNameInformation == FileInformationClass || FileNormalizedNameInformation == FileInformationClass) {
+            if (Length < sizeof(FILE_NAME_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            std::wstring wFilename;
+            if (!wchar_util::str_to_wstr(wFilename, g_vfs.GetRootPath(entry.name), CP_UTF8)) {
+                return STATUS_UNSUCCESSFUL;
+            }
+            size_t nameLenBytes = wFilename.length() * sizeof(WCHAR);
+            size_t remainingSpaceBytes = Length - offsetof(FILE_NAME_INFORMATION, FileName);
+            size_t bytesToCopy = min(nameLenBytes, remainingSpaceBytes);
+            FILE_NAME_INFORMATION* info = (FILE_NAME_INFORMATION*)FileInformation;
+            info->FileNameLength = (ULONG)nameLenBytes;
+            memcpy(info->FileName, wFilename.c_str(), bytesToCopy);
+            if (nameLenBytes > remainingSpaceBytes) {
+                IoStatusBlock->Status = STATUS_BUFFER_OVERFLOW;
+                IoStatusBlock->Information = offsetof(FILE_NAME_INFORMATION, FileName) + nameLenBytes;
+                return STATUS_BUFFER_OVERFLOW;
+            } else {
+                IoStatusBlock->Status = STATUS_SUCCESS;
+                IoStatusBlock->Information = offsetof(FILE_NAME_INFORMATION, FileName) + nameLenBytes;
+                return STATUS_SUCCESS;
+            }
+        } else if (FileInformationClass == FilePositionInformation) {
+            if (Length < sizeof(FILE_POSITION_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_POSITION_INFORMATION* info = (FILE_POSITION_INFORMATION*)FileInformation;
+            auto file = g_vfs.GetAsarFile(FileHandle);
+            if (file) {
+                info->CurrentByteOffset.QuadPart = file->tell();
+                IoStatusBlock->Status = STATUS_SUCCESS;
+                IoStatusBlock->Information = sizeof(FILE_POSITION_INFORMATION);
+                return STATUS_SUCCESS;
+            } else {
+                return STATUS_UNSUCCESSFUL;
+            }
+        } else if (FileInformationClass == FileModeInformation) {
+            if (Length < sizeof(FILE_MODE_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_MODE_INFORMATION* info = (FILE_MODE_INFORMATION*)FileInformation;
+            info->Mode = 0; // No special mode
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_MODE_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileAlignmentInformation) {
+            if (Length < sizeof(FILE_ALIGNMENT_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            FILE_ALIGNMENT_INFORMATION* info = (FILE_ALIGNMENT_INFORMATION*)FileInformation;
+            info->AlignmentRequirement = FILE_BYTE_ALIGNMENT; // No special alignment requirement
+            IoStatusBlock->Status = STATUS_SUCCESS;
+            IoStatusBlock->Information = sizeof(FILE_ALIGNMENT_INFORMATION);
+            return STATUS_SUCCESS;
+        } else if (FileInformationClass == FileAllInformation) {
+            if (Length < sizeof(FILE_ALL_INFORMATION)) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+            std::wstring wFilename;
+            if (!wchar_util::str_to_wstr(wFilename, g_vfs.GetRootPath(entry.name), CP_UTF8)) {
+                return STATUS_UNSUCCESSFUL;
+            }
+            FILE_ALL_INFORMATION* info = (FILE_ALL_INFORMATION*)FileInformation;
+            // Fill basic information
+            FILETIME ft;
+            GetSystemTimeAsFileTime(&ft);
+            info->BasicInformation.CreationTime.QuadPart = ft.dwLowDateTime | ((uint64_t)ft.dwHighDateTime << 32);
+            info->BasicInformation.LastAccessTime.QuadPart = info->BasicInformation.CreationTime.QuadPart;
+            info->BasicInformation.LastWriteTime.QuadPart = info->BasicInformation.CreationTime.QuadPart;
+            info->BasicInformation.ChangeTime.QuadPart = info->BasicInformation.CreationTime.QuadPart;
+            info->BasicInformation.FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
+            // Fill standard information
+            info->StandardInformation.AllocationSize.QuadPart = entry.size;
+            info->StandardInformation.EndOfFile.QuadPart = entry.size;
+            info->StandardInformation.NumberOfLinks = 1;
+            info->StandardInformation.DeletePending = FALSE;
+            info->StandardInformation.Directory = FALSE;
+            // Fill internal information
+            info->InternalInformation.IndexNumber.QuadPart = 0;
+            // Fill EA information
+            info->EaInformation.EaSize = 0; // No extended attributes
+            // Fill access information
+            info->AccessInformation.AccessFlags = READ_CONTROL;
+            // Fill position information
+            auto file = g_vfs.GetAsarFile(FileHandle);
+            if (file) {
+                info->PositionInformation.CurrentByteOffset.QuadPart = file->tell();
+            } else {
+                info->PositionInformation.CurrentByteOffset.QuadPart = 0;
+            }
+            // Fill mode information
+            info->ModeInformation.Mode = 0; // No special mode
+            // Fill alignment information
+            info->AlignmentInformation.AlignmentRequirement = FILE_BYTE_ALIGNMENT; // No special alignment requirement
+            // Fill name information
+            size_t nameLenBytes = wFilename.length() * sizeof(WCHAR);
+            size_t remainingSpaceBytes = Length - offsetof(FILE_ALL_INFORMATION, NameInformation.FileName);
+            size_t bytesToCopy = min(nameLenBytes, remainingSpaceBytes);
+            info->NameInformation.FileNameLength = (ULONG)nameLenBytes;
+            memcpy(info->NameInformation.FileName, wFilename.c_str(), bytesToCopy);
+            if (nameLenBytes > remainingSpaceBytes) {
+                IoStatusBlock->Status = STATUS_BUFFER_OVERFLOW;
+                IoStatusBlock->Information = offsetof(FILE_ALL_INFORMATION, NameInformation.FileName) + nameLenBytes;
+                return STATUS_BUFFER_OVERFLOW;
+            } else {
+                IoStatusBlock->Status = STATUS_SUCCESS;
+                IoStatusBlock->Information = offsetof(FILE_ALL_INFORMATION, NameInformation.FileName) + nameLenBytes;
+                return STATUS_SUCCESS;
+            }
+        }
+#endif
     } else if (g_vfs.IsDirectoryHandle(FileHandle)) {
         GLOG("NtQueryInformationFile (directory handle): %p, FileInformationClass: %d\n", FileHandle, FileInformationClass);
         if (FileInformationClass == FileNameInformation || FileInformationClass == FileNormalizedNameInformation) {
@@ -1288,6 +1507,9 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryVolumeInformationFile(
 #if WINVFS_MEMFILE
         || g_vfs.IsMemFileHandle(FileHandle)
 #endif
+#if WINVFS_ASAR
+        || g_vfs.IsAsarFileHandle(FileHandle)
+#endif
     ) {
         GLOG("NtQueryVolumeInformationFile: %p, FsInformationClass: %d\n", FileHandle, FsInformationClass);
         if (FsInformationClass == FileFsVolumeInformation) {
@@ -1352,6 +1574,9 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryObject(
         size_t memFileSize;
         std::string memFileName;
 #endif
+#if WINVFS_ASAR
+        asar::FileEntry asarEntry;
+#endif
         if (g_vfs.GetFileInfo(Handle, entry, archive)) {
             GLOG("NtQueryObject: %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
             if (ObjectInformationClass == ObjectNameInformation) {
@@ -1385,6 +1610,35 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryObject(
             if (ObjectInformationClass == ObjectNameInformation) {
                 std::string ntpath = g_vfs.GetNtPath(memFileName);
                 GLOG("Object name for memfile handle %p: %s\n", Handle, ntpath.c_str());
+                std::wstring wPath;
+                if (!wchar_util::str_to_wstr(wPath, ntpath, CP_UTF8)) {
+                    return STATUS_UNSUCCESSFUL;
+                }
+                ULONG requiredLength = sizeof(OBJECT_NAME_INFORMATION) + (ULONG)((wPath.length() + 1) * sizeof(wchar_t));
+                if (ReturnLength) {
+                    *ReturnLength = requiredLength;
+                }
+                if (ObjectInformationLength < requiredLength) {
+                    return STATUS_INFO_LENGTH_MISMATCH;
+                }
+                if (ObjectInformation) {
+                    POBJECT_NAME_INFORMATION pNameInfo = (POBJECT_NAME_INFORMATION)ObjectInformation;
+                    PWSTR destBuffer = (PWSTR)((PBYTE)ObjectInformation + sizeof(OBJECT_NAME_INFORMATION));
+                    memcpy(destBuffer, wPath.c_str(), wPath.length() * sizeof(wchar_t));
+                    destBuffer[wPath.length()] = L'\0';
+                    pNameInfo->Name.Length = (USHORT)(wPath.length() * sizeof(wchar_t));
+                    pNameInfo->Name.MaximumLength = (USHORT)((wPath.length() + 1) * sizeof(wchar_t));
+                    pNameInfo->Name.Buffer = destBuffer;
+                    return STATUS_SUCCESS;
+                }
+            }
+#endif
+#if WINVFS_ASAR
+        } else if (g_vfs.GetAsarFileInfo(Handle, asarEntry)) {
+            GLOG("NtQueryObject: %p, ObjectInformationClass: %d\n", Handle, ObjectInformationClass);
+            if (ObjectInformationClass == ObjectNameInformation) {
+                std::string ntpath = g_vfs.GetNtPath(asarEntry.name);
+                GLOG("Object name for ASAR file handle %p: %s\n", Handle, ntpath.c_str());
                 std::wstring wPath;
                 if (!wchar_util::str_to_wstr(wPath, ntpath, CP_UTF8)) {
                     return STATUS_UNSUCCESSFUL;
@@ -1497,6 +1751,23 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryAttributesFile(
                 FileInformation->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
                 return STATUS_SUCCESS;
 #endif
+#if WINVFS_ASAR
+            } else if (g_vfs.IsAsarFile(filepath)) {
+                GLOG("ASAR file found in VFS: %s\n", filepath.c_str());
+                // Set creation, access, write, change time to current time for simplicity
+                FILETIME ft;
+                GetSystemTimeAsFileTime(&ft);
+                FileInformation->CreationTime.LowPart = ft.dwLowDateTime;
+                FileInformation->CreationTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastAccessTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastAccessTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastWriteTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastWriteTime.HighPart = ft.dwHighDateTime;
+                FileInformation->ChangeTime.LowPart = ft.dwLowDateTime;
+                FileInformation->ChangeTime.HighPart = ft.dwHighDateTime;
+                FileInformation->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
+                return STATUS_SUCCESS;
+#endif
             } else if (g_vfs.HasDirectory(filepath)) {
                 GLOG("Directory found in VFS: %s\n", filepath.c_str());
                 auto re = Real_NtQueryAttributesFile(ObjectAttributes, FileInformation);
@@ -1552,6 +1823,11 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtSetInformationFile(
             if (!file) {
                 file = g_vfs.GetFile(FileHandle);
             }
+#if WINVFS_ASAR
+            if (!file) {
+                file = g_vfs.GetAsarFile(FileHandle);
+            }
+#endif
             if (file) {
                 auto result = file->seek(info->CurrentByteOffset.QuadPart, SEEK_SET);
                 if (result) {
@@ -1746,6 +2022,10 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryFullAttributesFile(
                 return STATUS_SUCCESS;
             }
 #endif
+#if WINVFS_ASAR
+            asar::FileEntry asarEntry;
+            asar::Archive* asarArchive;
+#endif
             if (g_vfs.GetEntry(filepath, entry, archive)) {
                 GLOG("File found in VFS: %s\n", filepath.c_str());
                 // Set creation, access, write, change time to current time for simplicity
@@ -1763,6 +2043,25 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtQueryFullAttributesFile(
                 FileInformation->AllocationSize.QuadPart = entry.original_size;
                 FileInformation->EndOfFile.QuadPart = entry.original_size;
                 return STATUS_SUCCESS;
+#if WINVFS_ASAR
+            } else if (g_vfs.GetAsarEntry(filepath, asarEntry, asarArchive)) {
+                GLOG("ASAR file found in VFS: %s\n", filepath.c_str());
+                // Set creation, access, write, change time to current time for simplicity
+                FILETIME ft;
+                GetSystemTimeAsFileTime(&ft);
+                FileInformation->CreationTime.LowPart = ft.dwLowDateTime;
+                FileInformation->CreationTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastAccessTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastAccessTime.HighPart = ft.dwHighDateTime;
+                FileInformation->LastWriteTime.LowPart = ft.dwLowDateTime;
+                FileInformation->LastWriteTime.HighPart = ft.dwHighDateTime;
+                FileInformation->ChangeTime.LowPart = ft.dwLowDateTime;
+                FileInformation->ChangeTime.HighPart = ft.dwHighDateTime;
+                FileInformation->FileAttributes = FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_READONLY;
+                FileInformation->AllocationSize.QuadPart = asarEntry.size;
+                FileInformation->EndOfFile.QuadPart = asarEntry.size;
+                return STATUS_SUCCESS;
+#endif
             } else if (g_vfs.HasDirectory(filepath)) {
                 GLOG("Directory found in VFS: %s\n", filepath.c_str());
                 auto re = Real_NtQueryFullAttributesFile(ObjectAttributes, FileInformation);
@@ -1941,6 +2240,15 @@ FILE_DIRECTORY_INFORMATION* GenFileDirectoryInformation(std::string& path, std::
             fileSize = fileEntry.original_size;
         }
     }
+#if WINVFS_ASAR
+    if (!found) {
+        asar::FileEntry asarEntry;
+        found = g_vfs.GetAsarFileEntry(fullPath, asarEntry);
+        if (found) {
+            fileSize = asarEntry.size;
+        }
+    }
+#endif
     if (wEntry.back() == '/') {
         wEntry.pop_back();
         isDir = true;
@@ -2006,6 +2314,15 @@ FILE_FULL_DIR_INFORMATION* GenFileFullDirInformation(std::string& path, std::str
             fileSize = fileEntry.original_size;
         }
     }
+#if WINVFS_ASAR
+    if (!found) {
+        asar::FileEntry asarEntry;
+        found = g_vfs.GetAsarFileEntry(fullPath, asarEntry);
+        if (found) {
+            fileSize = asarEntry.size;
+        }
+    }
+#endif
     if (wEntry.back() == '/') {
         wEntry.pop_back();
         isDir = true;
@@ -2071,6 +2388,15 @@ FILE_BOTH_DIR_INFORMATION* GenFileBothDirInformation(std::string& path, std::str
             fileSize = fileEntry.original_size;
         }
     }
+#if WINVFS_ASAR
+    if (!found) {
+        asar::FileEntry asarEntry;
+        found = g_vfs.GetAsarFileEntry(fullPath, asarEntry);
+        if (found) {
+            fileSize = asarEntry.size;
+        }
+    }
+#endif
     if (wEntry.back() == '/') {
         wEntry.pop_back();
         isDir = true;
@@ -2166,6 +2492,15 @@ FILE_ID_BOTH_DIR_INFORMATION* GenFileIdBothDirInformation(std::string& path, std
             fileId = fileEntry.adler32;
         }
     }
+#if WINVFS_ASAR
+    if (!found) {
+        asar::FileEntry asarEntry;
+        found = g_vfs.GetAsarFileEntry(fullPath, asarEntry);
+        if (found) {
+            fileSize = asarEntry.size;
+        }
+    }
+#endif
     if (wEntry.back() == '/') {
         wEntry.pop_back();
         isDir = true;
@@ -2234,6 +2569,15 @@ FILE_ID_FULL_DIR_INFORMATION* GenFileIdFullDirInformation(std::string& path, std
             fileId = fileEntry.adler32;
         }
     }
+#if WINVFS_ASAR
+    if (!found) {
+        asar::FileEntry asarEntry;
+        found = g_vfs.GetAsarFileEntry(fullPath, asarEntry);
+        if (found) {
+            fileSize = asarEntry.size;
+        }
+    }
+#endif
     if (wEntry.back() == '/') {
         wEntry.pop_back();
         isDir = true;
@@ -2581,6 +2925,9 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtWriteFile(
 #if WINVFS_MEMFILE
         || g_vfs.IsMemFileHandle(FileHandle)
 #endif
+#if WINVFS_ASAR
+        || g_vfs.IsAsarFileHandle(FileHandle)
+#endif
     ) {
         IoStatusBlock->Status = STATUS_UNSUCCESSFUL;
         IoStatusBlock->Information = 0;
@@ -2663,6 +3010,14 @@ VFS::~VFS() {
 #if WINVFS_MEMFILE
     for (auto& [handle, _]: memfile_handle_map) {
         delete (InMemReadStream*)handle;
+    }
+#endif
+#if WINVFS_ASAR
+    for (auto& [handle, _]: asar_handle_map) {
+        delete (asar::File*)handle;
+    }
+    for (auto archive: asar_archives) {
+        delete archive;
     }
 #endif
 #if WINVFS_LOGGING
@@ -3293,6 +3648,178 @@ ReadStream* VFS::GetMemFile(HANDLE hFile) {
     auto it = memfile_handle_map.find(hFile);
     if (it != memfile_handle_map.end()) {
         return (InMemReadStream*)hFile;
+    }
+    return nullptr;
+}
+#endif
+
+#if WINVFS_ASAR
+bool VFS::AddAsarArchive(const char* path) {
+    auto archive = new asar::Archive(path);
+    if (!archive->ReadIndex()) {
+        delete archive;
+        return false;
+    }
+    asar_archives.push_front(archive);
+    for (auto& entry : archive->files) {
+        auto name = str_util::str_replace(entry.name, "/", "\\");
+        AddEntry(str_util::str_replace(entry.name, "\\", "/"));
+        asar_files[name] = std::pair(entry, archive);
+    }
+    return true;
+}
+
+bool VFS::AddAsarArchive(std::string path) {
+    return AddAsarArchive(path.c_str());
+}
+
+bool VFS::AddAsarArchive(std::wstring path) {
+    std::string p;
+    if (!wchar_util::wstr_to_str(p, path, CP_UTF8)) {
+        return false;
+    }
+    return AddAsarArchive(p.c_str());
+}
+
+void VFS::AddAsarArchiveWithErrorMsg(const char* path) {
+    if (!AddAsarArchive(path)) {
+        std::wstring wpath;
+        if (!wchar_util::str_to_wstr(wpath, path, CP_UTF8)) {
+            MessageBoxW(NULL, L"无法打开资源文件。请检查资源文件是否完整", L"错误", MB_ICONERROR);
+            ExitProcess(1);
+            return;
+        }
+        std::wstring wmsg = L"无法打开 " + wpath + L"。请检查文件是否存在";
+        MessageBoxW(NULL, wmsg.c_str(), L"错误", MB_ICONERROR);
+        ExitProcess(1);
+        return;
+    }
+}
+
+void VFS::AddAsarArchiveWithErrorMsg(std::string path) {
+    AddAsarArchiveWithErrorMsg(path.c_str());
+}
+
+void VFS::AddAsarArchiveWithErrorMsg(std::wstring path) {
+    std::string p;
+    if (wchar_util::wstr_to_str(p, path, CP_UTF8)) {
+        AddAsarArchiveWithErrorMsg(p.c_str());
+    } else {
+        std::wstring wmsg = L"无法转换编码，文件" + path + L"无法打开";
+        MessageBoxW(NULL, wmsg.c_str(), L"错误", MB_ICONERROR);
+        ExitProcess(1);
+    }
+}
+
+bool VFS::GetAsarEntry(std::string& path, asar::FileEntry& entry, asar::Archive*& archive) {
+    std::string rPath;
+    if (str_util::str_startswith(path, dos_path)) {
+        rPath = path.substr(dos_path.length());
+    } else if (str_util::str_startswith(path, dos_system_path)) {
+        rPath = path.substr(dos_system_path.length());
+    } else if (str_util::str_startswith(path, guid_path)) {
+        rPath = path.substr(guid_path.length());
+    } else if (str_util::str_startswith(path, nt_path)) {
+        rPath = path.substr(nt_path.length());
+    } else if (str_util::str_startswith(path, base_path)) {
+        rPath = path.substr(base_path.length());
+    } else {
+        return false;
+    }
+    auto it = asar_files.find(rPath);
+    if (it == asar_files.end()) {
+        return false;
+    }
+    entry = it->second.first;
+    archive = it->second.second;
+    return true;
+}
+
+bool VFS::GetAsarFileEntry(std::string& path, asar::FileEntry& entry) {
+    auto rPath = str_util::str_replace(path, "/", "\\");
+    auto it = asar_files.find(rPath);
+    if (it == asar_files.end()) {
+        return false;
+    }
+    entry = it->second.first;
+    return true;
+}
+
+bool VFS::GetAsarFileInfo(HANDLE hFile, asar::FileEntry& entry) {
+    auto it = asar_handle_map.find(hFile);
+    if (it != asar_handle_map.end()) {
+        entry = it->second.first;
+        return true;
+    }
+    return false;
+}
+
+bool VFS::IsAsarFile(std::string& path) {
+    std::string rPath;
+    if (str_util::str_startswith(path, dos_path)) {
+        rPath = path.substr(dos_path.length());
+    } else if (str_util::str_startswith(path, dos_system_path)) {
+        rPath = path.substr(dos_system_path.length());
+    } else if (str_util::str_startswith(path, guid_path)) {
+        rPath = path.substr(guid_path.length());
+    } else if (str_util::str_startswith(path, nt_path)) {
+        rPath = path.substr(nt_path.length());
+    } else if (str_util::str_startswith(path, base_path)) {
+        rPath = path.substr(base_path.length());
+    } else {
+        return false;
+    }
+    return asar_files.find(rPath) != asar_files.end();
+}
+
+bool VFS::IsAsarFileHandle(HANDLE hFile) {
+    return asar_handle_map.find(hFile) != asar_handle_map.end();
+}
+
+HANDLE VFS::OpenAsarFile(std::string path) {
+    std::string rPath;
+    if (str_util::str_startswith(path, dos_path)) {
+        rPath = path.substr(dos_path.length());
+    } else if (str_util::str_startswith(path, dos_system_path)) {
+        rPath = path.substr(dos_system_path.length());
+    } else if (str_util::str_startswith(path, guid_path)) {
+        rPath = path.substr(guid_path.length());
+    } else if (str_util::str_startswith(path, nt_path)) {
+        rPath = path.substr(nt_path.length());
+    } else if (str_util::str_startswith(path, base_path)) {
+        rPath = path.substr(base_path.length());
+    } else {
+        return INVALID_HANDLE_VALUE;
+    }
+    auto it = asar_files.find(rPath);
+    if (it == asar_files.end()) {
+        return INVALID_HANDLE_VALUE;
+    }
+    auto file = it->second.second->OpenFile(it->second.first);
+    if (!file) {
+        return INVALID_HANDLE_VALUE;
+    }
+    auto hFile = (HANDLE)file;
+    asar_handle_map[hFile] = std::pair(it->second.first, it->second.second);
+    return hFile;
+}
+
+void VFS::CloseAsarFile(HANDLE hFile) {
+    auto it = asar_handle_map.find(hFile);
+    if (it != asar_handle_map.end()) {
+        asar_handle_map.erase(it);
+    }
+    auto it2 = complete_infos.find(hFile);
+    if (it2 != complete_infos.end()) {
+        complete_infos.erase(it2);
+    }
+    delete (asar::File*)hFile;
+}
+
+asar::File* VFS::GetAsarFile(HANDLE hFile) {
+    auto it = asar_handle_map.find(hFile);
+    if (it != asar_handle_map.end()) {
+        return (asar::File*)hFile;
     }
     return nullptr;
 }
