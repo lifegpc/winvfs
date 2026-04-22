@@ -225,10 +225,12 @@ public:
     void RemoveExistedDirHandle(HANDLE hDir);
     template <typename T>
     void AddDirEntriesCache(HANDLE hDir, FILE_INFORMATION_CLASS infoClass, DirEntriesCache<T>* cache) {
+        std::lock_guard<std::mutex> lock(dir_entries_cache_mutex);
         dir_entries_cache[std::make_pair(hDir, infoClass)] = cache;
     }
     template <typename T>
     DirEntriesCache<T>* GetDirEntriesCache(HANDLE hDir, FILE_INFORMATION_CLASS infoClass) {
+        std::lock_guard<std::mutex> lock(dir_entries_cache_mutex);
         auto it = dir_entries_cache.find(std::make_pair(hDir, infoClass));
         if (it != dir_entries_cache.end()) {
             return (DirEntriesCache<T>*)it->second;
@@ -237,6 +239,7 @@ public:
     }
     template <typename T>
     void RemoveDirEntriesCache(HANDLE hDir, FILE_INFORMATION_CLASS infoClass) {
+        std::lock_guard<std::mutex> lock(dir_entries_cache_mutex);
         auto it = dir_entries_cache.find(std::make_pair(hDir, infoClass));
         if (it != dir_entries_cache.end()) {
             delete (DirEntriesCache<T>*)it->second;
@@ -252,8 +255,9 @@ public:
     void AddDirectoryHandle(HANDLE hDir);
     bool IsDirectoryHandle(HANDLE hDir);
     void RemoveDirectoryHandle(HANDLE hDir);
-    PCompleteInfo GetCompletionInfo(HANDLE hFile);
-    void SetCompletionInfo(HANDLE hFile, CompleteInfo info);
+    bool GetCompletionInfo(HANDLE hFile, CompleteInfo& info);
+    void SetCompletionHandleInfo(HANDLE hFile, HANDLE port, PVOID key);
+    void SetCompletionNotificationFlags(HANDLE hFile, ULONG flags);
 #if WINVFS_MEMFILE
     bool GetMemEntry(std::string& path, size_t& size);
     bool GetMemFileEntry(std::string& path, size_t& size);
@@ -285,26 +289,35 @@ private:
     std::list<Xp3Archive*> archives;
     std::unordered_map<std::string, std::pair<FileEntry, Xp3Archive*>, CaseInsensitiveHash, CaseInsensitiveEqual> files;
     std::unordered_map<HANDLE, std::pair<FileEntry, Xp3Archive*>> handle_map;
+    std::mutex handle_map_mutex;
 #if WINVFS_LOGGING
     std::unordered_set<HANDLE> trace_handles;
+    std::mutex trace_handles_mutex;
 #endif
     std::unordered_map<HANDLE, std::pair<FileEntry, Xp3Archive*>> section_handles;
+    std::mutex section_handles_mutex;
     std::unordered_map<HANDLE, std::string> existed_dir_handles;
+    std::mutex existed_dir_handles_mutex;
     // second is DirEntriesCache<T>* , T is based on FILE_INFORMATION_CLASS
     std::unordered_map<std::pair<HANDLE, FILE_INFORMATION_CLASS>, void*, PairHasher> dir_entries_cache;
+    std::mutex dir_entries_cache_mutex;
     std::unordered_map<std::string, std::vector<std::string>, CaseInsensitiveHash, CaseInsensitiveEqual> directoryEntries;
     std::unordered_set<std::string, CaseInsensitiveHash, CaseInsensitiveEqual> addedEntries;
     std::unordered_set<HANDLE> dir_handles;
+    std::mutex dir_handles_mutex;
     std::unordered_map<HANDLE, CompleteInfo> complete_infos;
+    std::mutex complete_infos_mutex;
 #if WINVFS_MEMFILE
     std::unordered_map<std::string, std::vector<uint8_t>, CaseInsensitiveHash, CaseInsensitiveEqual> memfiles;
     // handle -> (original path, size)
     std::unordered_map<HANDLE, std::pair<std::string, size_t>> memfile_handle_map;
+    std::mutex memfile_handle_map_mutex;
 #endif
 #if WINVFS_ASAR
     std::list<asar::Archive*> asar_archives;
     std::unordered_map<std::string, std::pair<asar::FileEntry, asar::Archive*>, CaseInsensitiveHash, CaseInsensitiveEqual> asar_files;
     std::unordered_map<HANDLE, std::pair<asar::FileEntry, asar::Archive*>> asar_handle_map;
+    std::mutex asar_handle_map_mutex;
 #endif
 };
 

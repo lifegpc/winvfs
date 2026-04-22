@@ -740,15 +740,16 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtReadFile(
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = bytesRead;
         }
-        auto cinfo = g_vfs.GetCompletionInfo(FileHandle);
-        auto skipEvent = cinfo && cinfo->Seted && (cinfo->Flags & FILE_SKIP_SET_EVENT_ON_HANDLE);
+        CompleteInfo cinfo;
+        auto hasCompletionInfo = g_vfs.GetCompletionInfo(FileHandle, cinfo);
+        auto skipEvent = hasCompletionInfo && cinfo.Seted && (cinfo.Flags & FILE_SKIP_SET_EVENT_ON_HANDLE);
         if (Event && !skipEvent) {
             SetEvent(Event);
         }
-        if (cinfo && cinfo->Seted && !(cinfo->Flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)) {
+        if (hasCompletionInfo && cinfo.Seted && !(cinfo.Flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)) {
             Real_NtSetIoCompletion(
-                cinfo->Port,
-                cinfo->Key,
+                cinfo.Port,
+                cinfo.Key,
                 ApcContext,
                 STATUS_SUCCESS,
                 bytesRead
@@ -1845,15 +1846,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtSetInformationFile(
                 return STATUS_BUFFER_TOO_SMALL;
             }
             auto completionInfo = (FILE_COMPLETION_INFORMATION*)FileInformation;
-            auto now = g_vfs.GetCompletionInfo(FileHandle);
-            if (now) {
-                now->Key = completionInfo->Key;
-                now->Port = completionInfo->Port;
-                now->Seted = TRUE;
-            } else {
-                auto newInfo = CompleteInfo { completionInfo->Port, completionInfo->Key, 0, TRUE };
-                g_vfs.SetCompletionInfo(FileHandle, newInfo);
-            }
+            g_vfs.SetCompletionHandleInfo(FileHandle, completionInfo->Port, completionInfo->Key);
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = sizeof(FILE_COMPLETION_INFORMATION);
             return STATUS_SUCCESS;
@@ -1862,13 +1855,7 @@ __kernel_entry NTSTATUS NTAPI Hooked_NtSetInformationFile(
                 return STATUS_BUFFER_TOO_SMALL;
             }
             auto notificationInfo = (FILE_IO_COMPLETION_NOTIFICATION_INFORMATION*)FileInformation;
-            auto now = g_vfs.GetCompletionInfo(FileHandle);
-            if (now) {
-                now->Flags = notificationInfo->Flags;
-            } else {
-                auto newInfo = CompleteInfo { NULL, NULL, notificationInfo->Flags, FALSE };
-                g_vfs.SetCompletionInfo(FileHandle, newInfo);
-            }
+            g_vfs.SetCompletionNotificationFlags(FileHandle, notificationInfo->Flags);
             IoStatusBlock->Status = STATUS_SUCCESS;
             IoStatusBlock->Information = sizeof(FILE_IO_COMPLETION_NOTIFICATION_INFORMATION);
             return STATUS_SUCCESS;
@@ -2992,29 +2979,44 @@ void CleanupCache(std::pair<HANDLE, FILE_INFORMATION_CLASS> info, void*& cache) 
 
 VFS::~VFS() {
     Uninit();
-    LOG("dir_entries_cache size: %zu\n", dir_entries_cache.size());
-    for (auto& [info, cache]: dir_entries_cache) {
-        CleanupCache(info, cache);
+    {
+        std::lock_guard<std::mutex> lock(dir_entries_cache_mutex);
+        LOG("dir_entries_cache size: %zu\n", dir_entries_cache.size());
+        for (auto& [info, cache]: dir_entries_cache) {
+            CleanupCache(info, cache);
+        }
     }
-    LOG("handle_map size: %zu\n", handle_map.size());
-    for (auto& [handle, _]: handle_map) {
-        delete (Xp3File*)handle;
+    {
+        std::lock_guard<std::mutex> lock(handle_map_mutex);
+        LOG("handle_map size: %zu\n", handle_map.size());
+        for (auto& [handle, _]: handle_map) {
+            delete (Xp3File*)handle;
+        }
     }
-    LOG("dir_handles size: %zu\n", dir_handles.size());
-    for (auto& handle: dir_handles) {
-        delete (DirEntry*)handle;
+    {
+        std::lock_guard<std::mutex> lock(dir_handles_mutex);
+        LOG("dir_handles size: %zu\n", dir_handles.size());
+        for (auto& handle: dir_handles) {
+            delete (DirEntry*)handle;
+        }
     }
     for (auto archive : archives) {
         delete archive;
     }
 #if WINVFS_MEMFILE
-    for (auto& [handle, _]: memfile_handle_map) {
-        delete (InMemReadStream*)handle;
+    {
+        std::lock_guard<std::mutex> lock(memfile_handle_map_mutex);
+        for (auto& [handle, _]: memfile_handle_map) {
+            delete (InMemReadStream*)handle;
+        }
     }
 #endif
 #if WINVFS_ASAR
-    for (auto& [handle, _]: asar_handle_map) {
-        delete (asar::File*)handle;
+    {
+        std::lock_guard<std::mutex> lock(asar_handle_map_mutex);
+        for (auto& [handle, _]: asar_handle_map) {
+            delete (asar::File*)handle;
+        }
     }
     for (auto archive: asar_archives) {
         delete archive;
@@ -3177,22 +3179,30 @@ HANDLE VFS::OpenFile(FileEntry entry, Xp3Archive* archive) {
         return INVALID_HANDLE_VALUE;
     }
     auto hFile = (HANDLE)file;
+    std::lock_guard<std::mutex> lock(handle_map_mutex);
     handle_map[hFile] = std::pair(entry, archive);
     return hFile;
 }
 
 bool VFS::ContainsFile(HANDLE file) {
+    std::lock_guard<std::mutex> lock(handle_map_mutex);
     return handle_map.find(file) != handle_map.end();
 }
 
 void VFS::CloseFile(HANDLE file) {
-    auto it = handle_map.find(file);
-    if (it != handle_map.end()) {
-        handle_map.erase(it);
+    {
+        std::lock_guard<std::mutex> lock(handle_map_mutex);
+        auto it = handle_map.find(file);
+        if (it != handle_map.end()) {
+            handle_map.erase(it);
+        }
     }
-    auto it2 = complete_infos.find(file);
-    if (it2 != complete_infos.end()) {
-        complete_infos.erase(it2);
+    {
+        std::lock_guard<std::mutex> lock(complete_infos_mutex);
+        auto it2 = complete_infos.find(file);
+        if (it2 != complete_infos.end()) {
+            complete_infos.erase(it2);
+        }
     }
     delete (Xp3File*)file;
 }
@@ -3209,6 +3219,7 @@ void VFS::Log(const char* format, ...) {
 #endif
 
 Xp3File* VFS::GetFile(HANDLE file) {
+    std::lock_guard<std::mutex> lock(handle_map_mutex);
     auto it = handle_map.find(file);
     if (it != handle_map.end()) {
         return (Xp3File*)file;
@@ -3217,6 +3228,7 @@ Xp3File* VFS::GetFile(HANDLE file) {
 }
 
 bool VFS::GetFileInfo(HANDLE file, FileEntry& entry, Xp3Archive*& archive) {
+    std::lock_guard<std::mutex> lock(handle_map_mutex);
     auto it = handle_map.find(file);
     if (it != handle_map.end()) {
         entry = it->second.first;
@@ -3266,27 +3278,33 @@ std::string VFS::GetNtPath(std::string& path) {
 
 #if WINVFS_LOGGING
 void VFS::AddTrace(HANDLE hFile) {
+    std::lock_guard<std::mutex> lock(trace_handles_mutex);
     trace_handles.insert(hFile);
 }
 
 bool VFS::InTrace(HANDLE hFile) {
+    std::lock_guard<std::mutex> lock(trace_handles_mutex);
     return trace_handles.find(hFile) != trace_handles.end();
 }
 #endif
 
 void VFS::AddSectionHandle(HANDLE hSection, std::pair<FileEntry, Xp3Archive*> fileInfo) {
+    std::lock_guard<std::mutex> lock(section_handles_mutex);
     section_handles[hSection] = fileInfo;
 }
 
 bool VFS::IsSectionHandle(HANDLE hSection) {
+    std::lock_guard<std::mutex> lock(section_handles_mutex);
     return section_handles.find(hSection) != section_handles.end();
 }
 
 void VFS::RemoveSectionHandle(HANDLE hSection) {
+    std::lock_guard<std::mutex> lock(section_handles_mutex);
     section_handles.erase(hSection);
 }
 
 bool VFS::GetSectionInfo(HANDLE hSection, FileEntry& entry, Xp3Archive*& archive) {
+    std::lock_guard<std::mutex> lock(section_handles_mutex);
     auto it = section_handles.find(hSection);
     if (it != section_handles.end()) {
         entry = it->second.first;
@@ -3305,10 +3323,12 @@ bool VFS::IsRootDirectory(std::string& path) {
 }
 
 void VFS::AddExistedDirHandle(HANDLE hDir, std::string path) {
+    std::lock_guard<std::mutex> lock(existed_dir_handles_mutex);
     existed_dir_handles[hDir] = path;
 }
 
 std::string VFS::GetExistedDirHandlePath(HANDLE hDir) {
+    std::lock_guard<std::mutex> lock(existed_dir_handles_mutex);
     auto it = existed_dir_handles.find(hDir);
     if (it != existed_dir_handles.end()) {
         return it->second;
@@ -3317,19 +3337,26 @@ std::string VFS::GetExistedDirHandlePath(HANDLE hDir) {
 }
 
 bool VFS::IsExistedDirHandle(HANDLE hDir) {
+    std::lock_guard<std::mutex> lock(existed_dir_handles_mutex);
     return existed_dir_handles.find(hDir) != existed_dir_handles.end();
 }
 
 void VFS::RemoveExistedDirHandle(HANDLE hDir) {
-    existed_dir_handles.erase(hDir);
-    auto it = dir_entries_cache.begin();
-    while (it != dir_entries_cache.end()) {
-        if (it->first.first == hDir) {
-            LOG("Removing cache for handle: %p, type: %d\n", hDir, it->first.second);
-            CleanupCache(it->first, it->second);
-            it = dir_entries_cache.erase(it);
-        } else {
-            ++it;
+    {
+        std::lock_guard<std::mutex> lock(existed_dir_handles_mutex);
+        existed_dir_handles.erase(hDir);
+    }
+    {
+        std::lock_guard<std::mutex> lock(dir_entries_cache_mutex);
+        auto it = dir_entries_cache.begin();
+        while (it != dir_entries_cache.end()) {
+            if (it->first.first == hDir) {
+                LOG("Removing cache for handle: %p, type: %d\n", hDir, it->first.second);
+                CleanupCache(it->first, it->second);
+                it = dir_entries_cache.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 }
@@ -3448,23 +3475,31 @@ HANDLE VFS::OpenDirectory(std::string path) {
 }
  
 void VFS::AddDirectoryHandle(HANDLE hDir) {
+    std::lock_guard<std::mutex> lock(dir_handles_mutex);
     dir_handles.insert(hDir);
 }
 
 bool VFS::IsDirectoryHandle(HANDLE hDir) {
+    std::lock_guard<std::mutex> lock(dir_handles_mutex);
     return dir_handles.find(hDir) != dir_handles.end();
 }
 
 void VFS::RemoveDirectoryHandle(HANDLE hDir) {
-    dir_handles.erase(hDir);
-    auto it = dir_entries_cache.begin();
-    while (it != dir_entries_cache.end()) {
-        if (it->first.first == hDir) {
-            LOG("Removing cache for handle: %p, type: %d\n", hDir, it->first.second);
-            CleanupCache(it->first, it->second);
-            it = dir_entries_cache.erase(it);
-        } else {
-            ++it;
+    {
+        std::lock_guard<std::mutex> lock(dir_handles_mutex);
+        dir_handles.erase(hDir);
+    }
+    {
+        std::lock_guard<std::mutex> lock(dir_entries_cache_mutex);
+        auto it = dir_entries_cache.begin();
+        while (it != dir_entries_cache.end()) {
+            if (it->first.first == hDir) {
+                LOG("Removing cache for handle: %p, type: %d\n", hDir, it->first.second);
+                CleanupCache(it->first, it->second);
+                it = dir_entries_cache.erase(it);
+            } else {
+                ++it;
+            }
         }
     }
 }
@@ -3516,16 +3551,28 @@ void VFS::AddArchiveWithErrorMsg(std::wstring path) {
     }
 }
 
-PCompleteInfo VFS::GetCompletionInfo(HANDLE hFile) {
+bool VFS::GetCompletionInfo(HANDLE hFile, CompleteInfo& info) {
+    std::lock_guard<std::mutex> lock(complete_infos_mutex);
     auto it = complete_infos.find(hFile);
     if (it != complete_infos.end()) {
-        return &it->second;
+        info = it->second;
+        return true;
     }
-    return nullptr;
+    return false;
 }
 
-void VFS::SetCompletionInfo(HANDLE hFile, CompleteInfo info) {
-    complete_infos[hFile] = info;
+void VFS::SetCompletionHandleInfo(HANDLE hFile, HANDLE port, PVOID key) {
+    std::lock_guard<std::mutex> lock(complete_infos_mutex);
+    auto& info = complete_infos[hFile];
+    info.Port = port;
+    info.Key = key;
+    info.Seted = TRUE;
+}
+
+void VFS::SetCompletionNotificationFlags(HANDLE hFile, ULONG flags) {
+    std::lock_guard<std::mutex> lock(complete_infos_mutex);
+    auto& info = complete_infos[hFile];
+    info.Flags = flags;
 }
 
 #if WINVFS_MEMFILE
@@ -3573,6 +3620,7 @@ bool VFS::GetMemFileEntry(std::string& path, size_t& size) {
 }
 
 bool VFS::GetMemFileInfo(HANDLE hFile, size_t& size, std::string& name) {
+    std::lock_guard<std::mutex> lock(memfile_handle_map_mutex);
     auto it = memfile_handle_map.find(hFile);
     if (it != memfile_handle_map.end()) {
         name = it->second.first;
@@ -3624,27 +3672,36 @@ HANDLE VFS::OpenMemFile(std::string path) {
         return INVALID_HANDLE_VALUE;
     }
     auto hFile = (HANDLE)file;
+    std::lock_guard<std::mutex> lock(memfile_handle_map_mutex);
     memfile_handle_map[hFile] = std::pair(rPath, it->second.size());
     return hFile;
 }
 
 bool VFS::IsMemFileHandle(HANDLE hFile) {
+    std::lock_guard<std::mutex> lock(memfile_handle_map_mutex);
     return memfile_handle_map.find(hFile) != memfile_handle_map.end();
 }
 
 void VFS::CloseMemFile(HANDLE hFile) {
-    auto it = memfile_handle_map.find(hFile);
-    if (it != memfile_handle_map.end()) {
-        memfile_handle_map.erase(it);
+    {
+        std::lock_guard<std::mutex> lock(memfile_handle_map_mutex);
+        auto it = memfile_handle_map.find(hFile);
+        if (it != memfile_handle_map.end()) {
+            memfile_handle_map.erase(it);
+        }
     }
-    auto it2 = complete_infos.find(hFile);
-    if (it2 != complete_infos.end()) {
-        complete_infos.erase(it2);
+    {
+        std::lock_guard<std::mutex> lock(complete_infos_mutex);
+        auto it2 = complete_infos.find(hFile);
+        if (it2 != complete_infos.end()) {
+            complete_infos.erase(it2);
+        }
     }
     delete (InMemReadStream*)hFile;
 }
 
 ReadStream* VFS::GetMemFile(HANDLE hFile) {
+    std::lock_guard<std::mutex> lock(memfile_handle_map_mutex);
     auto it = memfile_handle_map.find(hFile);
     if (it != memfile_handle_map.end()) {
         return (InMemReadStream*)hFile;
@@ -3746,6 +3803,7 @@ bool VFS::GetAsarFileEntry(std::string& path, asar::FileEntry& entry) {
 }
 
 bool VFS::GetAsarFileInfo(HANDLE hFile, asar::FileEntry& entry) {
+    std::lock_guard<std::mutex> lock(asar_handle_map_mutex);
     auto it = asar_handle_map.find(hFile);
     if (it != asar_handle_map.end()) {
         entry = it->second.first;
@@ -3773,6 +3831,7 @@ bool VFS::IsAsarFile(std::string& path) {
 }
 
 bool VFS::IsAsarFileHandle(HANDLE hFile) {
+    std::lock_guard<std::mutex> lock(asar_handle_map_mutex);
     return asar_handle_map.find(hFile) != asar_handle_map.end();
 }
 
@@ -3800,23 +3859,31 @@ HANDLE VFS::OpenAsarFile(std::string path) {
         return INVALID_HANDLE_VALUE;
     }
     auto hFile = (HANDLE)file;
+    std::lock_guard<std::mutex> lock(asar_handle_map_mutex);
     asar_handle_map[hFile] = std::pair(it->second.first, it->second.second);
     return hFile;
 }
 
 void VFS::CloseAsarFile(HANDLE hFile) {
-    auto it = asar_handle_map.find(hFile);
-    if (it != asar_handle_map.end()) {
-        asar_handle_map.erase(it);
+    {
+        std::lock_guard<std::mutex> lock(asar_handle_map_mutex);
+        auto it = asar_handle_map.find(hFile);
+        if (it != asar_handle_map.end()) {
+            asar_handle_map.erase(it);
+        }
     }
-    auto it2 = complete_infos.find(hFile);
-    if (it2 != complete_infos.end()) {
-        complete_infos.erase(it2);
+    {
+        std::lock_guard<std::mutex> lock(complete_infos_mutex);
+        auto it2 = complete_infos.find(hFile);
+        if (it2 != complete_infos.end()) {
+            complete_infos.erase(it2);
+        }
     }
     delete (asar::File*)hFile;
 }
 
 asar::File* VFS::GetAsarFile(HANDLE hFile) {
+    std::lock_guard<std::mutex> lock(asar_handle_map_mutex);
     auto it = asar_handle_map.find(hFile);
     if (it != asar_handle_map.end()) {
         return (asar::File*)hFile;
